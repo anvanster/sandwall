@@ -40,8 +40,11 @@ expect_fail "metadata 169.254.169.254 blocked" sbx t1 curl -sS -m 3 http://169.2
 wait_log t1 "metadata deny logged" '.type=="deny" and .dst_ip=="169.254.169.254" and .reason=="blocked_range"'
 expect_fail "host LAN IP $HOST_IP blocked" sbx t1 curl -sS -m 3 "http://$HOST_IP/"
 wait_log t1 "host access deny logged" ".type==\"deny\" and .dst_ip==\"$HOST_IP\" and .reason==\"host_access\""
+# A gateway on a private address is a blocked range; one on a public
+# address is just another destination outside the allowlist.
+if nft get element inet egressd blocked_ranges "{ $GATEWAY_IP }" >/dev/null 2>&1; then gw_reason=blocked_range; else gw_reason=not_allowed; fi
 expect_fail "LAN gateway $GATEWAY_IP blocked" sbx t1 curl -sS -m 3 "http://$GATEWAY_IP/"
-wait_log t1 "LAN gateway deny logged" ".type==\"deny\" and .dst_ip==\"$GATEWAY_IP\" and .reason==\"blocked_range\""
+wait_log t1 "LAN gateway deny logged ($gw_reason)" ".type==\"deny\" and .dst_ip==\"$GATEWAY_IP\" and .reason==\"$gw_reason\""
 expect_fail "other sandbox 10.200.2.2 blocked" sbx t1 curl -sS -m 3 http://10.200.2.2/
 wait_log t1 "cross-sandbox deny logged" '.type=="deny" and .dst_ip=="10.200.2.2" and .reason=="blocked_range"'
 expect_eq "t2 refuses example.com on its own proxy" "$(dns_status t2 example.com)" REFUSED

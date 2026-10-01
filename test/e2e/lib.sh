@@ -84,9 +84,20 @@ wait_log() {
 	[[ -f "$file" ]] && tail -n 5 "$file" | sed 's/^/        /'
 }
 
+# REAL_PROXY=http://host:port: the host has no direct internet access and
+# reaches it through this HTTP proxy. Daemons then use it as their upstream
+# proxy, with the local attacker net as a no_proxy destination, so internet
+# checks go through the proxy and attacker checks behave as without one.
+# Scripts that pass their own --upstream-proxy (proxy.sh) are left alone.
+REAL_PROXY=${REAL_PROXY:-}
+
 # start_daemon [extra daemon flags...]
 start_daemon() {
-	"$EGRESSD" "${G[@]}" daemon --blocked-exempt 10.99.0.0/24 --metrics-addr 127.0.0.1:19464 "$@" \
+	local extra=()
+	if [[ -n "$REAL_PROXY" && " $* " != *" --upstream-proxy "* ]]; then
+		extra=(--upstream-proxy "$REAL_PROXY" --no-proxy 10.99.0.0/24)
+	fi
+	"$EGRESSD" "${G[@]}" daemon --blocked-exempt 10.99.0.0/24 --metrics-addr 127.0.0.1:19464 "${extra[@]}" "$@" \
 		>>"$T/daemon.log" 2>&1 &
 	DAEMON_PID=$!
 	for _ in $(seq 50); do

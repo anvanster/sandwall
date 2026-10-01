@@ -34,6 +34,7 @@ e2e-m2: build
 	sudo $(E2E_ENV) bash test/e2e/m2.sh
 
 # Upstream proxy mode; REAL_PROXY=http://host:port also fetches real sites through it.
+# On a host without direct internet, REAL_PROXY also makes e2e-m1/m2/m3 run their daemons behind it.
 e2e-proxy: build
 	sudo $(E2E_ENV) bash test/e2e/proxy.sh
 

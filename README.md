@@ -216,7 +216,8 @@ Design decisions and deviations from the original plan, with the measurements be
 make test         # unit tests: policy parsing, allowlist matching, DNS proxy, golden nftables rulesets
 make vet fmt-check
 make e2e          # root-only acceptance tests for M1-M3 and proxy mode (M3 needs /dev/kvm); run in a disposable VM
-make e2e-proxy REAL_PROXY=http://host:port   # also fetch real sites through a site proxy
+make e2e REAL_PROXY=http://host:port         # on a host without direct internet: every daemon uses the site proxy,
+                                             # and e2e-proxy also fetches real sites through it
 ```
 
 Every e2e script starts and ends with `egressd nuke`, uses its own state and log directories, and checks that nothing egressd created is left behind.

@@ -150,6 +150,15 @@ With a 100ms bucket, a 10 Mbit cap measured 5 Mbit/s for a guest TCP upload.
 With 1s it measures 9 Mbit/s.
 The host `tbf` on the IFB still does the fine-grained shaping; the Firecracker limiter is a second, coarser boundary that holds even if host shaping is misconfigured.
 
+### M3 acceptance on a host without direct internet
+The bare-metal M3 host reaches the internet only through an HTTP proxy, so the guest checks that fetch real sites could not pass with direct egress.
+With `REAL_PROXY` set, every e2e daemon runs with that proxy as its upstream proxy and the local attacker net as `no_proxy`.
+Internet checks then go through the relay, and attacker-based checks (bandwidth, clone fetches, denies) take the same direct path as before.
+On that host M1 (77), M2 (54) and M3 (59, with `--stagger 0` and all 20 clones fetching at once) pass in full.
+
+The M1 "LAN gateway" check used to expect `blocked_range`, assuming the default gateway is on a private address.
+It now asks the live `blocked_ranges` set: a gateway on a public address, as on that host, is denied as `not_allowed` like any other unlisted destination.
+
 ### `vm clone --stagger` and nested virtualization
 M3 was developed in a Lima VM (vz backend) with nested virtualization on Apple silicon.
 There, starting many KVM guests back to back (about 0.6s apart) left most of them with a vCPU spinning in the guest, unresponsive for minutes.
