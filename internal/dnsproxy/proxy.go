@@ -40,6 +40,9 @@ const (
 	VerdictRefused     = "refused"
 	VerdictRateLimited = "ratelimited"
 	VerdictError       = "error"
+
+	// ReasonQuarantined is logged for every query of a quarantined sandbox.
+	ReasonQuarantined = "quarantined"
 )
 
 // Inserter adds DNS-learned addresses to allow_<k>, and with direct also to
@@ -77,6 +80,7 @@ type Proxy struct {
 	upstream    string
 	limiter     *rate.Limiter
 	overLimitLg *rate.Limiter
+	quarantined bool
 
 	// setMu serializes allow-set writes with policy reloads, which flush
 	// and repopulate the set from the cache.
@@ -152,6 +156,20 @@ func (p *Proxy) Reload(s Settings, repopulate func(allowed, direct []nft.AllowEn
 // Domain returns the most recent allowlisted name that resolved to ip.
 func (p *Proxy) Domain(ip netip.Addr) string { return p.cache.domain(ip) }
 
+// SetQuarantined makes the proxy refuse every query without forwarding it
+// (true), or answer by policy again (false). Releasing also forgets every
+// learned address, so a released sandbox starts from empty allow sets.
+func (p *Proxy) SetQuarantined(q bool) {
+	p.setMu.Lock()
+	defer p.setMu.Unlock()
+	p.mu.Lock()
+	p.quarantined = q
+	p.mu.Unlock()
+	if !q {
+		p.cache.reset()
+	}
+}
+
 // ServeDNS implements dns.Handler.
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	resp, ev := p.handle(r, w.RemoteAddr().Network())
@@ -188,8 +206,15 @@ func (p *Proxy) handle(r *dns.Msg, network string) (*dns.Msg, *flowlog.Event) {
 	}
 
 	p.mu.RLock()
-	allow, direct, upstream, limiter := p.allow, p.direct, p.upstream, p.limiter
+	allow, direct, upstream, limiter, quarantined := p.allow, p.direct, p.upstream, p.limiter, p.quarantined
 	p.mu.RUnlock()
+
+	if quarantined {
+		// Logged like any refusal, but never rate-limited away: during an
+		// incident every attempted name is evidence.
+		ev.Verdict, ev.Reason = VerdictRefused, ReasonQuarantined
+		return reply(r, dns.RcodeRefused), ev
+	}
 
 	if !limiter.Allow() {
 		ev.Verdict = VerdictRateLimited
@@ -346,6 +371,13 @@ type cache struct {
 
 func newCache() *cache {
 	return &cache{byIP: map[netip.Addr]map[string]time.Time{}, recent: map[netip.Addr]string{}}
+}
+
+func (c *cache) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.byIP = map[netip.Addr]map[string]time.Time{}
+	c.recent = map[netip.Addr]string{}
 }
 
 func (c *cache) add(qname string, entries []nft.AllowEntry, now time.Time) {

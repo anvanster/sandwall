@@ -118,7 +118,7 @@ type SnapshotMeta struct {
 // Snapshot pauses the VM, writes a full snapshot plus copies of its drives
 // to outDir, and resumes it. Memory and disks are captured while paused, so
 // they are consistent with each other.
-func (v VM) Snapshot(ctx context.Context, sourceID, outDir string) (err error) {
+func (v VM) Snapshot(ctx context.Context, sourceID, outDir string, keepPaused bool) (err error) {
 	if err := os.MkdirAll(outDir, 0o700); err != nil {
 		return err
 	}
@@ -135,6 +135,9 @@ func (v VM) Snapshot(ctx context.Context, sourceID, outDir string) (err error) {
 		return fmt.Errorf("pause: %w", err)
 	}
 	defer func() {
+		if keepPaused {
+			return
+		}
 		if rerr := v.api(ctx, http.MethodPatch, "/vm", map[string]string{"state": "Resumed"}); rerr != nil {
 			err = errors.Join(err, fmt.Errorf("resume: %w", rerr))
 		}
@@ -260,6 +263,16 @@ func (v VM) Alive() bool {
 }
 
 // Stop kills the VMM and removes the jail. It is idempotent.
+// Pause stops the guest's vCPUs; its memory and devices are kept.
+func (v VM) Pause(ctx context.Context) error {
+	return v.api(ctx, http.MethodPatch, "/vm", map[string]string{"state": "Paused"})
+}
+
+// Resume restarts a paused guest.
+func (v VM) Resume(ctx context.Context) error {
+	return v.api(ctx, http.MethodPatch, "/vm", map[string]string{"state": "Resumed"})
+}
+
 func (v VM) Stop() error {
 	if pid, err := v.pid(); err == nil {
 		_ = syscall.Kill(pid, syscall.SIGKILL)

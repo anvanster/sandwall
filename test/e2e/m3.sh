@@ -72,6 +72,18 @@ up=$(mbps "$T/v1-up.json")
 if ((up >= 8 && up <= 11)); then pass "guest upload ${up} Mbit/s at the 10mbit cap"; else fail "guest upload ${up} Mbit/s"; fi
 wait_log v1 "guest flow logged" ".type==\"flow\" and .dst_ip==\"$A\" and .dst_port==5201 and .bytes_out > 1000000"
 
+log "quarantine a VM"
+expect_eq "guest reaches the allowed attacker" "$(vmx v1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://$A:$ATTACKER_PORT/")" 200
+expect_ok "quarantine v1" egressd sandbox quarantine v1 --reason "e2e"
+expect_fail "guest cut off" vmx v1 curl -sS -m 3 "http://$A:$ATTACKER_PORT/"
+wait_log v1 "guest traffic dropped as quarantined" ".type==\"deny\" and .dst_ip==\"$A\" and .reason==\"quarantined\""
+expect_eq "guest DNS refused" "$(vm_dns_status v1 pypi.org)" REFUSED
+expect_ok "quarantine --freeze pauses the VM" egressd sandbox quarantine v1 --freeze
+expect_eq "VM paused" "$(fc_api v1 / | jq -r .state)" Paused
+expect_ok "release v1" egressd sandbox release v1
+expect_eq "VM resumed" "$(fc_api v1 / | jq -r .state)" Running
+expect_eq "guest reaches the attacker again" "$(vmx v1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://$A:$ATTACKER_PORT/")" 200
+
 log "snapshot and $CLONES clones"
 SNAP="$T/snap"
 expect_ok "snapshot v1" egressd vm snapshot v1 --out "$SNAP"

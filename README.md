@@ -165,6 +165,25 @@ Traffic to the host itself is dropped (`host_access`), except DNS to the sandbox
 With the SNI check, step 7 first rejects QUIC to DNS-learned addresses (`quic_blocked`), and accepted TCP to ports 80 and 443 goes on to the relay.
 With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (forwarded directly) and otherwise only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
 
+## Quarantine
+
+```sh
+sudo bin/egressd sandbox quarantine agent --reason "DNS tunnel attempt" [--freeze]
+sudo bin/egressd sandbox release agent
+```
+
+`quarantine` cuts a sandbox off at once and keeps it for forensics:
+
+- every packet from or to it is dropped, established connections included, and relayed connections are closed;
+- its conntrack entries are deleted, so each cut flow is logged with the bytes it moved, and none can resume after a release;
+- its DNS proxy refuses every query without forwarding it, and logs each one (`reason: quarantined`), without the usual rate limit on log lines;
+- with `--freeze`, its processes are stopped with SIGSTOP (exec mode) or its VM is paused;
+- its netns, VM, policy and logs stay in place, and `vm snapshot` of a frozen VM keeps it paused.
+
+The quarantine is persisted and survives a daemon restart, and `policy apply` does not lift it.
+`release` restores the policy with empty allow sets, so names must be resolved again, and thaws a frozen sandbox.
+`destroy` works on a quarantined sandbox as usual.
+
 ## Observability
 
 Each sandbox has a JSONL log at `/var/log/egressd/<id>.jsonl`; `egressd logs <id> [-f] [--deny-only]` prints it.
@@ -175,6 +194,7 @@ Logs outlive the sandbox.
 | `dns` | `qname`, `qtype`, `verdict` (`allow`, `refused`, `ratelimited`, `error`), `answers` |
 | `flow` | `proto`, `dst_ip`, `dst_port`, `dst_domain`, `bytes_out`, `bytes_in`, `ts_start`, `ts_end` |
 | `deny` | `reason`, `proto`, `dst_ip`, `dst_port` |
+| `quarantine` | `verdict` (`quarantined`, `released`), `reason` (the operator's) |
 | `relay` | connections through the relay: `src_port`, `dst_ip`, `dst_port`, `dst_domain`, `target` (dialed address, or the proxy's CONNECT/request target), `sni`, `http_host`, `proxy_status` (with a proxy), `connect_ms`; on `deny`, `reason` (`sni_mismatch`, `host_mismatch`, `bad_client_hello`, `dial_error`, `proxy_refused`, `proxy_error`, `conn_limit`) |
 
 Every line also has `ts`, `sandbox_id` and `verdict`.
@@ -190,6 +210,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 | `egressd_dns_queries_total` | `verdict` |
 | `egressd_denied_total` | `reason` |
 | `egressd_relay_connections_total` | `result` (`ok`, `denied`, `refused`, `error`) |
+| `egressd_quarantined` (gauge) | |
 
 ## Threat model
 
@@ -227,7 +248,7 @@ Open work and verification still owed are tracked in [TODO.md](TODO.md).
 ```sh
 make test         # unit tests: policy parsing, allowlist matching, DNS proxy, golden nftables rulesets
 make vet fmt-check
-make e2e          # root-only acceptance tests for M1-M3, the SNI check (S1) and proxy mode (M3 needs /dev/kvm); run in a disposable VM
+make e2e          # root-only acceptance tests for M1-M3, the SNI check (S1), quarantine and proxy mode (M3 needs /dev/kvm); run in a disposable VM
 make e2e REAL_PROXY=http://host:port         # on a host without direct internet: every daemon uses the site proxy,
                                              # and e2e-proxy also fetches real sites through it
 ```

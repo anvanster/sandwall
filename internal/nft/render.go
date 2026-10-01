@@ -6,6 +6,7 @@
 //	table inet egressd
 //	  set blocked_ranges, blocked_exempt        (global, interval)
 //	  set direct_cidrs                          (global, interval) no_proxy CIDRs
+//	  set quarantined                           (global) host veths of quarantined sandboxes
 //	  map pre_vmap, in_vmap, nat_vmap           (ifname -> jump sb_<k> / sbin_<k> / sbnat_<k>)
 //	  chain prerouting  (hook)  host-bound traffic to input; iifname vmap @pre_vmap; unknown veth-h* drop
 //	  chain relay_redirect (hook, nat) with the relay: iifname vmap @nat_vmap
@@ -60,6 +61,9 @@ const (
 	// ReasonQUICBlocked: with the SNI check, QUIC (UDP 443) to a
 	// DNS-learned address, whose server name the relay cannot check.
 	ReasonQUICBlocked = "quic_blocked"
+	// ReasonQuarantined: anything from or to a quarantined sandbox, except
+	// DNS to its own proxy (which refuses and logs every query).
+	ReasonQuarantined = "quarantined"
 )
 
 // SNIPorts are the TCP ports the SNI check sends through the relay.
@@ -123,6 +127,11 @@ type SandboxConfig struct {
 	// Allowed; PreserveAllowed keeps it as is unless ResetDirect is set.
 	Direct      []AllowEntry
 	ResetDirect bool
+	// Quarantined cuts the sandbox off: every packet from it is dropped,
+	// established flows included, replies to it are dropped in forward,
+	// its allow and direct sets are emptied, and only DNS to its own proxy
+	// is admitted. Policy limits and allowlists are kept for the release.
+	Quarantined bool
 }
 
 // AllowEntry is one DNS-learned address and how long it stays allowed.
@@ -175,6 +184,7 @@ func (b *builder) declareBase() {
 	b.line("add map inet %s in_vmap { type ifname : verdict; }", t)
 	b.line("add map inet %s nat_vmap { type ifname : verdict; }", t)
 	b.line("add set inet %s direct_cidrs { type ipv4_addr; flags interval; auto-merge; }", t)
+	b.line("add set inet %s quarantined { type ifname; }", t)
 	// TCP gets a reset: ICMP errors are rate-limited per destination by the
 	// kernel (net.ipv4.icmp_ratelimit), which turns most rejects of a
 	// connection burst into silent drops and client timeouts.
@@ -229,6 +239,8 @@ func RenderBase(cfg BaseConfig) string {
 	// fwd_vmap dispatched policy from forward before it moved to prerouting.
 	b.line("add map inet %s fwd_vmap { type ifname : verdict; }", t)
 	b.line("delete map inet %s fwd_vmap", t)
+	// Replies on flows a quarantined sandbox had open must not reach it.
+	b.line("add rule inet %s forward oifname @quarantined counter drop", t)
 	b.line("add rule inet %s forward oifname \"veth-h*\" ct state established,related accept", t)
 	b.line("add rule inet %s forward oifname \"veth-h*\" counter drop", t)
 
@@ -276,15 +288,15 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	b.line("flush chain inet %s sbnat_%d", t, k)
 	b.line("add set inet %s allow_%d { type ipv4_addr; flags timeout; }", t, k)
 	b.line("add set inet %s direct_%d { type ipv4_addr; flags timeout; }", t, k)
-	if !cfg.PreserveAllowed {
+	if !cfg.PreserveAllowed || cfg.Quarantined {
 		b.line("flush set inet %s allow_%d", t, k)
-		if len(cfg.Allowed) > 0 {
+		if len(cfg.Allowed) > 0 && !cfg.Quarantined {
 			b.line("add element inet %s allow_%d { %s }", t, k, joinAllow(cfg.Allowed))
 		}
 	}
-	if !cfg.PreserveAllowed || cfg.ResetDirect {
+	if !cfg.PreserveAllowed || cfg.ResetDirect || cfg.Quarantined {
 		b.line("flush set inet %s direct_%d", t, k)
-		if len(cfg.Direct) > 0 {
+		if len(cfg.Direct) > 0 && !cfg.Quarantined {
 			b.line("add element inet %s direct_%d { %s }", t, k, joinAllow(cfg.Direct))
 		}
 	}
@@ -293,6 +305,20 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	if len(cidrs) > 0 {
 		b.line("add element inet %s allow_cidr_%d { %s }", t, k, joinPrefixes(cidrs))
 	}
+
+	// The element is first ensured to exist so deleting it never fails.
+	b.line("add element inet %s quarantined { %q }", t, sb.HostVeth)
+	if cfg.Quarantined {
+		in := fmt.Sprintf("add rule inet %s sbin_%d", t, k)
+		b.line("add rule inet %s sb_%d %s", t, k, logDrop(k, ReasonQuarantined))
+		b.line("%s ip daddr %s meta l4proto { tcp, udp } th dport 53 accept", in, sb.HostAddr)
+		b.line("%s %s", in, logDrop(k, ReasonQuarantined))
+		b.line("add element inet %s pre_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
+		b.line("add element inet %s in_vmap { %q : jump sbin_%d }", t, sb.HostVeth, k)
+		b.line("add element inet %s nat_vmap { %q : jump sbnat_%d }", t, sb.HostVeth, k)
+		return b.String(), nil
+	}
+	b.line("delete element inet %s quarantined { %q }", t, sb.HostVeth)
 
 	chain := fmt.Sprintf("add rule inet %s sb_%d", t, k)
 	// 1. Return traffic for flows already admitted.
@@ -395,6 +421,8 @@ func RenderRemoveSandbox(k int) (string, error) {
 	b.line("delete element inet %s pre_vmap { %q }", t, sb.HostVeth)
 	b.line("delete element inet %s in_vmap { %q }", t, sb.HostVeth)
 	b.line("delete element inet %s nat_vmap { %q }", t, sb.HostVeth)
+	b.line("add element inet %s quarantined { %q }", t, sb.HostVeth)
+	b.line("delete element inet %s quarantined { %q }", t, sb.HostVeth)
 	for _, c := range []string{"sb", "sbin", "sbnat"} {
 		b.line("flush chain inet %s %s_%d", t, c, k)
 		b.line("delete chain inet %s %s_%d", t, c, k)

@@ -91,6 +91,17 @@ type Record struct {
 	// VM mode: exactly one of VMConfig (boot) or Snapshot (clone) is set.
 	VMConfig string `json:"vm_config,omitempty"`
 	Snapshot string `json:"snapshot,omitempty"`
+	// Quarantine is set while the sandbox is quarantined.
+	Quarantine *Quarantine `json:"quarantine,omitempty"`
+}
+
+// Quarantine describes a quarantined sandbox.
+type Quarantine struct {
+	Since  time.Time `json:"since"`
+	Reason string    `json:"reason,omitempty"`
+	// Frozen: the sandbox's processes are stopped (exec mode) or its VM
+	// is paused (vm mode).
+	Frozen bool `json:"frozen,omitempty"`
 }
 
 // Info is the API view of a sandbox.
@@ -106,6 +117,8 @@ type Info struct {
 	Policy   *policy.Policy `json:"policy"`
 	LogPath  string         `json:"log_path"`
 	VM       *VMInfo        `json:"vm,omitempty"`
+	// Quarantine is set while the sandbox is quarantined.
+	Quarantine *Quarantine `json:"quarantine,omitempty"`
 }
 
 // VMInfo describes a VM-mode sandbox's microVM.
@@ -481,6 +494,7 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 	}
 	rules := mgr.sandboxRules(sb.Index, pol, nil, nil, restoring)
 	rules.ResetDirect = restoring && mgr.resetDirect
+	rules.Quarantined = rec.Quarantine != nil
 	script, err := nft.RenderSandbox(rules)
 	if err != nil {
 		return err
@@ -499,6 +513,9 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 		Sink:       mgr.sink,
 		CountQuery: func(id, verdict string) { mgr.m.DNSQueries.WithLabelValues(id, verdict).Inc() },
 	}, mgr.proxySettings(pol))
+	if rec.Quarantine != nil {
+		proxy.SetQuarantined(true)
+	}
 	if err := proxy.Start(); err != nil {
 		_ = mgr.sink.Close(rec.ID)
 		return err
@@ -514,6 +531,9 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 			Count:     mgr.countRelay,
 			Log:       mgr.log,
 		}, relaySettings(pol))
+		if rec.Quarantine != nil {
+			rl.SetQuarantined(true)
+		}
 		if err := rl.Start(); err != nil {
 			proxy.Stop()
 			_ = mgr.sink.Close(rec.ID)
@@ -526,10 +546,17 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 	mgr.byIndex[sb.Index] = s
 	mgr.mu.Unlock()
 
+	if rec.Quarantine != nil {
+		mgr.m.Quarantined.WithLabelValues(rec.ID).Set(1)
+	}
+
 	// The VM starts last: its DNS and policy are in place before it boots.
 	if rec.Mode == ModeVM && !(restoring && vm.Alive()) {
 		if err := mgr.startVM(ctx, vm, rec, pol); err != nil {
 			return err
+		}
+		if rec.Quarantine != nil && rec.Quarantine.Frozen {
+			return vm.Pause(ctx)
 		}
 	}
 	return nil
@@ -625,7 +652,9 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 		return Info{}, err
 	}
 	err = s.proxy.Reload(mgr.proxySettings(pol), func(live, direct []nft.AllowEntry) error {
-		script, err := nft.RenderSandbox(mgr.sandboxRules(s.addr.Index, pol, live, direct, false))
+		rules := mgr.sandboxRules(s.addr.Index, pol, live, direct, false)
+		rules.Quarantined = s.rec.Quarantine != nil
+		script, err := nft.RenderSandbox(rules)
 		if err != nil {
 			return err
 		}
@@ -682,11 +711,149 @@ func (mgr *Manager) Snapshot(ctx context.Context, id, outDir string) error {
 	if !vm.Alive() {
 		return fmt.Errorf("sandbox %s: VM is not running", id)
 	}
-	if err := vm.Snapshot(ctx, id, outDir); err != nil {
+	frozen := s.rec.Quarantine != nil && s.rec.Quarantine.Frozen
+	if err := vm.Snapshot(ctx, id, outDir, frozen); err != nil {
 		return err
 	}
 	mgr.log.Info("snapshotted sandbox", "id", id, "dir", outDir)
 	return nil
+}
+
+// Quarantine cuts a sandbox off the network at once while keeping it for
+// forensics: every packet from it is dropped (established flows and
+// relayed connections included), its conntrack entries are deleted, which
+// logs them with their byte counts, and its DNS proxy refuses and logs
+// every query. With freeze, its processes are stopped (exec mode) or its
+// VM paused. Quarantining an already quarantined sandbox re-applies it.
+// The quarantine is persisted and survives a daemon restart.
+func (mgr *Manager) Quarantine(ctx context.Context, id, reason string, freeze bool) (Info, error) {
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
+	s, err := mgr.lookup(id)
+	if err != nil {
+		return Info{}, err
+	}
+	q := &Quarantine{Since: time.Now().UTC(), Reason: reason, Frozen: freeze}
+	if old := s.rec.Quarantine; old != nil {
+		q.Since, q.Frozen = old.Since, old.Frozen || freeze
+		if q.Reason == "" {
+			q.Reason = old.Reason
+		}
+	}
+	if err := mgr.ensureHost(ctx); err != nil {
+		return Info{}, err
+	}
+	// The firewall goes first: from here on nothing leaves or arrives.
+	rules := mgr.sandboxRules(s.addr.Index, s.policy, nil, nil, false)
+	rules.Quarantined = true
+	script, err := nft.RenderSandbox(rules)
+	if err != nil {
+		return Info{}, err
+	}
+	if err := nft.Apply(ctx, script); err != nil {
+		return Info{}, fmt.Errorf("quarantine firewall: %w", err)
+	}
+	s.proxy.SetQuarantined(true)
+	if s.relay != nil {
+		s.relay.SetQuarantined(true)
+	}
+	var errs []error
+	killed, err := flowlog.KillFlows(s.addr.NsAddr)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("network cut, but deleting conntrack entries failed: %w", err))
+	}
+	if freeze {
+		if err := mgr.freeze(ctx, s); err != nil {
+			errs = append(errs, fmt.Errorf("network cut, but freezing failed: %w", err))
+			q.Frozen = s.rec.Quarantine != nil && s.rec.Quarantine.Frozen
+		}
+	}
+	rec := s.rec
+	rec.Quarantine = q
+	if err := mgr.persist(rec); err != nil {
+		errs = append(errs, fmt.Errorf("network cut, but the quarantine was not persisted: %w", err))
+	}
+	mgr.mu.Lock()
+	s.rec = rec
+	mgr.mu.Unlock()
+	mgr.m.Quarantined.WithLabelValues(id).Set(1)
+	mgr.sink.Write(flowlog.Event{Type: flowlog.TypeQuarantine, SandboxID: id, Verdict: "quarantined", Reason: q.Reason})
+	mgr.log.Warn("quarantined sandbox", "id", id, "reason", q.Reason, "frozen", q.Frozen, "flows_killed", killed)
+	info, err := mgr.Get(id)
+	return info, errors.Join(append(errs, err)...)
+}
+
+// Release lifts a quarantine. The sandbox starts again from empty allow
+// sets: addresses it learned before the quarantine must be resolved again.
+func (mgr *Manager) Release(ctx context.Context, id string) (Info, error) {
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
+	s, err := mgr.lookup(id)
+	if err != nil {
+		return Info{}, err
+	}
+	q := s.rec.Quarantine
+	if q == nil {
+		return Info{}, fmt.Errorf("sandbox %s is not quarantined", id)
+	}
+	if err := mgr.ensureHost(ctx); err != nil {
+		return Info{}, err
+	}
+	// Policy first, with empty allow sets; the DNS proxy, still refusing,
+	// cannot fill them until it is released right after.
+	script, err := nft.RenderSandbox(mgr.sandboxRules(s.addr.Index, s.policy, nil, nil, false))
+	if err != nil {
+		return Info{}, err
+	}
+	if err := nft.Apply(ctx, script); err != nil {
+		return Info{}, err
+	}
+	s.proxy.SetQuarantined(false)
+	if s.relay != nil {
+		s.relay.SetQuarantined(false)
+	}
+	var errs []error
+	if q.Frozen {
+		if err := mgr.thaw(ctx, s); err != nil {
+			errs = append(errs, fmt.Errorf("network restored, but thawing failed: %w", err))
+		}
+	}
+	rec := s.rec
+	rec.Quarantine = nil
+	if err := mgr.persist(rec); err != nil {
+		errs = append(errs, err)
+	}
+	mgr.mu.Lock()
+	s.rec = rec
+	mgr.mu.Unlock()
+	mgr.m.Quarantined.WithLabelValues(id).Set(0)
+	mgr.sink.Write(flowlog.Event{Type: flowlog.TypeQuarantine, SandboxID: id, Verdict: "released", Reason: q.Reason})
+	mgr.log.Info("released sandbox", "id", id)
+	info, err := mgr.Get(id)
+	return info, errors.Join(append(errs, err)...)
+}
+
+func (mgr *Manager) freeze(ctx context.Context, s *sandbox) error {
+	if s.rec.Mode == ModeVM {
+		vm := mgr.vm(s.addr, s.rec.ID)
+		if !vm.Alive() {
+			return nil
+		}
+		return vm.Pause(ctx)
+	}
+	_, err := netns.FreezeProcesses(s.addr)
+	return err
+}
+
+func (mgr *Manager) thaw(ctx context.Context, s *sandbox) error {
+	if s.rec.Mode == ModeVM {
+		vm := mgr.vm(s.addr, s.rec.ID)
+		if !vm.Alive() {
+			return nil
+		}
+		return vm.Resume(ctx)
+	}
+	return netns.ThawProcesses(s.addr)
 }
 
 // Destroy removes a sandbox and everything it created. Its logs are kept.
@@ -872,6 +1039,7 @@ func (mgr *Manager) info(s *sandbox) Info {
 		ID: rec.ID, Index: s.addr.Index, Mode: rec.Mode, Netns: s.addr.Netns,
 		HostVeth: s.addr.HostVeth, HostAddr: s.addr.HostAddr.String(), NsAddr: s.addr.NsAddr.String(),
 		Created: rec.Created, Policy: pol, LogPath: flowlog.Path(mgr.opts.LogDir, rec.ID),
+		Quarantine: rec.Quarantine,
 	}
 	if rec.Mode == ModeVM {
 		vm := mgr.vm(s.addr, rec.ID)

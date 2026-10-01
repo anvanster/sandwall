@@ -99,8 +99,9 @@ type Relay struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	connMu sync.Mutex
-	conns  map[*net.TCPConn]struct{}
+	connMu      sync.Mutex
+	conns       map[*net.TCPConn]struct{}
+	quarantined bool
 }
 
 // New creates a stopped relay.
@@ -128,6 +129,19 @@ func (r *Relay) Reload(s Settings) {
 	r.allow = dnsproxy.NewAllowlist(s.AllowDomains)
 	r.cidrs = append([]netip.Prefix(nil), s.AllowCIDRs...)
 	r.maxConns = max(s.MaxConns, 1)
+}
+
+// SetQuarantined closes every relayed connection and refuses new ones
+// (true), or accepts connections again (false).
+func (r *Relay) SetQuarantined(q bool) {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	r.quarantined = q
+	if q {
+		for c := range r.conns {
+			reset(c)
+		}
+	}
 }
 
 // Start binds the listener on the sandbox's host-side address.
@@ -195,6 +209,9 @@ func (r *Relay) track(c *net.TCPConn) bool {
 	r.mu.RUnlock()
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
+	if r.quarantined {
+		return false
+	}
 	if len(r.conns) >= limit {
 		ev := r.baseEvent(c, netip.AddrPort{})
 		r.deny(ev, nft.ReasonConnLimit)

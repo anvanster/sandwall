@@ -54,6 +54,12 @@ type PolicyRequest struct {
 	Policy string `json:"policy"`
 }
 
+// QuarantineRequest is the body of POST /v1/sandboxes/{id}/quarantine.
+type QuarantineRequest struct {
+	Reason string `json:"reason,omitempty"`
+	Freeze bool   `json:"freeze,omitempty"`
+}
+
 // ErrorResponse is returned with every non-2xx status.
 type ErrorResponse struct {
 	Error string `json:"error"`

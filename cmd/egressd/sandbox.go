@@ -26,7 +26,8 @@ const (
 
 func newSandboxCmd(g *globalFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "sandbox", Short: "Manage sandboxes"}
-	cmd.AddCommand(newSandboxCreateCmd(g), newSandboxExecCmd(g), newSandboxListCmd(g), newSandboxDestroyCmd(g))
+	cmd.AddCommand(newSandboxCreateCmd(g), newSandboxExecCmd(g), newSandboxListCmd(g), newSandboxDestroyCmd(g),
+		newSandboxQuarantineCmd(g), newSandboxReleaseCmd(g))
 	return cmd
 }
 
@@ -145,6 +146,12 @@ func newSandboxListCmd(g *globalFlags) *cobra.Command {
 				} else if i.VM != nil {
 					state = "vm running"
 				}
+				if q := i.Quarantine; q != nil {
+					state = "QUARANTINED"
+					if q.Frozen {
+						state += ",frozen"
+					}
+				}
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", i.ID, i.Mode, i.Netns, state,
 					strings.Join(i.Policy.Egress.AllowDomains, ","), i.Created.Format("2006-01-02 15:04:05"))
 			}
@@ -165,6 +172,49 @@ func newSandboxDestroyCmd(g *globalFlags) *cobra.Command {
 				return err
 			}
 			fmt.Printf("destroyed %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+func newSandboxQuarantineCmd(g *globalFlags) *cobra.Command {
+	var req api.QuarantineRequest
+	cmd := &cobra.Command{
+		Use:   "quarantine <id>",
+		Short: "Cut a sandbox off the network at once, keeping it and its logs for forensics",
+		Long: `Drop every packet from and to the sandbox, established connections included,
+refuse and log all of its DNS queries, and keep its netns, VM and logs.
+With --freeze its processes are stopped (exec mode) or its VM is paused.
+The quarantine survives a daemon restart; lift it with "sandbox release".`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var info daemon.Info
+			err := api.NewClient(g.socket).Do(cmd.Context(), http.MethodPost, api.SandboxPath(args[0], "/quarantine"), req, &info)
+			if info.Quarantine != nil {
+				frozen := ""
+				if info.Quarantine.Frozen {
+					frozen = ", frozen"
+				}
+				fmt.Printf("quarantined %s%s\n", args[0], frozen)
+			}
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&req.Reason, "reason", "", "why, recorded in the sandbox log")
+	cmd.Flags().BoolVar(&req.Freeze, "freeze", false, "also stop the sandbox's processes, or pause its VM")
+	return cmd
+}
+
+func newSandboxReleaseCmd(g *globalFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "release <id>",
+		Short: "Lift a quarantine; the sandbox must resolve its allowlisted names again",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := api.NewClient(g.socket).Do(cmd.Context(), http.MethodDelete, api.SandboxPath(args[0], "/quarantine"), nil, nil); err != nil {
+				return err
+			}
+			fmt.Printf("released %s\n", args[0])
 			return nil
 		},
 	}

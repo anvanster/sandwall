@@ -25,6 +25,9 @@ const (
 	// allow) or refused by the relay, the proxy or the destination
 	// (verdict deny, with a reason).
 	TypeRelay = "relay"
+	// TypeQuarantine records a sandbox being quarantined (verdict
+	// "quarantined") or released ("released"); reason is the operator's.
+	TypeQuarantine = "quarantine"
 )
 
 // Event is one JSONL log line. Fields irrelevant to a type are omitted.
@@ -63,7 +66,8 @@ type Event struct {
 
 // IsDenial reports whether an event records something the policy blocked.
 func (e *Event) IsDenial() bool {
-	return e.Type == TypeDeny || ((e.Type == TypeDNS || e.Type == TypeRelay) && e.Verdict != "allow")
+	return e.Type == TypeDeny || e.Type == TypeQuarantine ||
+		((e.Type == TypeDNS || e.Type == TypeRelay) && e.Verdict != "allow")
 }
 
 // Path returns the log file for a sandbox.

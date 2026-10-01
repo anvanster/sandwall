@@ -1,0 +1,10 @@
+egress:
+  default: deny
+  allow_domains: ["*.attacker.test"]
+upstream_dns: 10.99.0.1:5353
+limits:
+  # Slow on the wire, so a download is still in flight when it is cut
+  # (a client-side --limit-rate only slows reading an already full buffer).
+  max_ingress_bw: 2mbit
+  max_conns: 64
+  new_conns_per_sec: 100

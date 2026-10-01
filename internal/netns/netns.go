@@ -266,18 +266,55 @@ func withLockedThread(fn func() error) error {
 // killNetnsProcesses SIGKILLs every process whose network namespace is the
 // named sandbox netns, so destroy leaves nothing running behind.
 func killNetnsProcesses(name string) error {
+	_, err := signalNetnsProcesses(name, unix.SIGKILL)
+	return err
+}
+
+// FreezeProcesses SIGSTOPs every process in the sandbox's netns. A process
+// forked while the first pass runs is caught by a later one; passes repeat
+// until one finds nothing new. It returns how many processes were stopped.
+func FreezeProcesses(sb addressing.Sandbox) (int, error) {
+	seen := map[int]bool{}
+	for range 5 {
+		pids, err := signalNetnsProcesses(sb.Netns, unix.SIGSTOP)
+		if err != nil {
+			return len(seen), err
+		}
+		fresh := false
+		for _, p := range pids {
+			if !seen[p] {
+				seen[p], fresh = true, true
+			}
+		}
+		if !fresh {
+			break
+		}
+	}
+	return len(seen), nil
+}
+
+// ThawProcesses SIGCONTs every process in the sandbox's netns.
+func ThawProcesses(sb addressing.Sandbox) error {
+	_, err := signalNetnsProcesses(sb.Netns, unix.SIGCONT)
+	return err
+}
+
+// signalNetnsProcesses sends sig to every process whose network namespace
+// is the named netns and returns their pids.
+func signalNetnsProcesses(name string, sig unix.Signal) ([]int, error) {
 	var target syscall.Stat_t
 	if err := syscall.Stat(filepath.Join(RunDir, name), &target); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	procs, err := os.ReadDir("/proc")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	self := os.Getpid()
+	var pids []int
 	for _, p := range procs {
 		pid, err := strconv.Atoi(p.Name())
 		if err != nil || pid == self {
@@ -288,10 +325,12 @@ func killNetnsProcesses(name string) error {
 			continue
 		}
 		if st.Ino == target.Ino && st.Dev == target.Dev {
-			_ = unix.Kill(pid, unix.SIGKILL)
+			if unix.Kill(pid, sig) == nil {
+				pids = append(pids, pid)
+			}
 		}
 	}
-	return nil
+	return pids, nil
 }
 
 func addr(a netip.Addr, bits int) *netlink.Addr {

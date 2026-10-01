@@ -1,0 +1,32 @@
+add table inet egressd
+add set inet egressd blocked_ranges { type ipv4_addr; flags interval; auto-merge; }
+add set inet egressd blocked_exempt { type ipv4_addr; flags interval; auto-merge; }
+add map inet egressd pre_vmap { type ifname : verdict; }
+add map inet egressd in_vmap { type ifname : verdict; }
+add map inet egressd nat_vmap { type ifname : verdict; }
+add set inet egressd direct_cidrs { type ipv4_addr; flags interval; auto-merge; }
+add set inet egressd quarantined { type ifname; }
+add chain inet egressd conn_reject
+flush chain inet egressd conn_reject
+add rule inet egressd conn_reject meta l4proto tcp reject with tcp reset
+add rule inet egressd conn_reject reject with icmpx admin-prohibited
+add chain inet egressd sb_7
+flush chain inet egressd sb_7
+add chain inet egressd sbin_7
+flush chain inet egressd sbin_7
+add chain inet egressd sbnat_7
+flush chain inet egressd sbnat_7
+add set inet egressd allow_7 { type ipv4_addr; flags timeout; }
+add set inet egressd direct_7 { type ipv4_addr; flags timeout; }
+flush set inet egressd allow_7
+flush set inet egressd direct_7
+add set inet egressd allow_cidr_7 { type ipv4_addr; flags interval; auto-merge; }
+flush set inet egressd allow_cidr_7
+add element inet egressd allow_cidr_7 { 203.0.113.0/24 }
+add element inet egressd quarantined { "veth-h7" }
+add rule inet egressd sb_7 counter log group 1 prefix "egressd:7:quarantined " drop
+add rule inet egressd sbin_7 ip daddr 10.200.7.1 meta l4proto { tcp, udp } th dport 53 accept
+add rule inet egressd sbin_7 counter log group 1 prefix "egressd:7:quarantined " drop
+add element inet egressd pre_vmap { "veth-h7" : jump sb_7 }
+add element inet egressd in_vmap { "veth-h7" : jump sbin_7 }
+add element inet egressd nat_vmap { "veth-h7" : jump sbnat_7 }

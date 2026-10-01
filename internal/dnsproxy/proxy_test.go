@@ -249,3 +249,29 @@ func TestDirectNamesFeedTheDirectSet(t *testing.T) {
 		t.Errorf("after removing the name: allow %v, direct %v", allowed, direct)
 	}
 }
+
+func TestQuarantineRefusesEverythingAndReleaseForgets(t *testing.T) {
+	up, n := fakeUpstream(t)
+	p, rec := newTestProxy(t, Settings{AllowDomains: []string{"pypi.org"}, QPS: 1, Upstream: up})
+	if resp, _ := p.handle(query("pypi.org", dns.TypeA), "udp"); resp.Rcode != dns.RcodeSuccess {
+		t.Fatal("setup query failed")
+	}
+	p.SetQuarantined(true)
+	for range 5 { // above the QPS limit: every query must still be logged
+		resp, ev := p.handle(query("pypi.org", dns.TypeA), "udp")
+		if resp.Rcode != dns.RcodeRefused || ev == nil || ev.Reason != ReasonQuarantined {
+			t.Fatalf("quarantined query: rcode %d event %+v", resp.Rcode, ev)
+		}
+	}
+	if n.Load() != 1 || len(rec.entries) != 2 {
+		t.Errorf("quarantined queries reached upstream (%d) or the allow set (%v)", n.Load(), rec.entries)
+	}
+	p.SetQuarantined(false)
+	var live []nft.AllowEntry
+	if err := p.Reload(Settings{AllowDomains: []string{"pypi.org"}, QPS: 50, Upstream: up}, func(a, _ []nft.AllowEntry) error { live = a; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 0 {
+		t.Errorf("addresses learned before the quarantine survived the release: %v", live)
+	}
+}

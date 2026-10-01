@@ -533,3 +533,29 @@ func TestDirectDialError(t *testing.T) {
 		t.Errorf("event %+v", ev)
 	}
 }
+
+func TestQuarantineClosesAndRefuses(t *testing.T) {
+	h := newHarness(t, 200, pypi, Settings{AllowDomains: []string{"pypi.org"}, MaxConns: 4}, "")
+	c := h.dial(t)
+	sendClientHello(c, "pypi.org")
+	select {
+	case <-h.proxy.tunneled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing tunneled")
+	}
+	// The fake proxy closes its side after the first read, so open a
+	// connection that is still waiting in the peek to test the cut.
+	idle := h.dial(t)
+	time.Sleep(100 * time.Millisecond)
+	h.relay.SetQuarantined(true)
+	expectClosed(t, idle)
+	late := h.dial(t)
+	expectClosed(t, late)
+	h.relay.SetQuarantined(false)
+	sendClientHello(h.dial(t), "pypi.org")
+	select {
+	case <-h.proxy.tunneled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay did not accept connections after the release")
+	}
+}

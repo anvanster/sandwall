@@ -46,6 +46,18 @@ func NewHandler(mgr *daemon.Manager) http.Handler {
 		info, err := mgr.ApplyPolicy(r.Context(), r.PathValue("id"), req.Policy)
 		respond(w, http.StatusOK, info, err)
 	})
+	mux.HandleFunc("POST /v1/sandboxes/{id}/quarantine", func(w http.ResponseWriter, r *http.Request) {
+		var req QuarantineRequest
+		if !readJSON(w, r, &req) {
+			return
+		}
+		info, err := mgr.Quarantine(r.Context(), r.PathValue("id"), req.Reason, req.Freeze)
+		respond(w, http.StatusOK, info, err)
+	})
+	mux.HandleFunc("DELETE /v1/sandboxes/{id}/quarantine", func(w http.ResponseWriter, r *http.Request) {
+		info, err := mgr.Release(r.Context(), r.PathValue("id"))
+		respond(w, http.StatusOK, info, err)
+	})
 	mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", func(w http.ResponseWriter, r *http.Request) {
 		var req SnapshotRequest
 		if !readJSON(w, r, &req) {

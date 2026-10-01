@@ -93,6 +93,18 @@ func TestRenderSandboxSNICheck(t *testing.T) {
 	golden(t, "sandbox-sni.nft", got)
 }
 
+func TestRenderSandboxQuarantined(t *testing.T) {
+	got, err := RenderSandbox(SandboxConfig{
+		Index: 7, AllowCIDRs: []string{"203.0.113.0/24"}, MaxConns: 64, NewConnsPerSec: 20, SNICheck: true,
+		Quarantined: true, PreserveAllowed: true,
+		Allowed: []AllowEntry{{Addr: netip.MustParseAddr("151.101.0.223"), Timeout: 300 * time.Second}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "sandbox-quarantined.nft", got)
+}
+
 func TestRenderSandboxRejectsBadInput(t *testing.T) {
 	if _, err := RenderSandbox(SandboxConfig{Index: 0, MaxConns: 1, NewConnsPerSec: 1}); err == nil {
 		t.Error("index 0 accepted")

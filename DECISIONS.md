@@ -332,3 +332,39 @@ The HTTP `Host` inside TLS is not visible without TLS interception, so domain fr
 ### Testing
 `test/e2e/s1.sh` runs an HTTP endpoint on port 80 and a TCP hold server on 443 in the attacker netns.
 It checks allowed and refused Host and SNI, that flows are still logged on the sandbox leg, that QUIC to a DNS-learned address is rejected while other UDP is not, that other TCP ports are neither checked nor relayed, that the relay port is not reachable directly, and that `--sni-check=false` removes the redirect.
+
+## Quarantine
+
+### Why
+Detection alone does not stop an agent that is already exfiltrating.
+`policy apply` deliberately keeps established flows (M1 checks that an in-flight download survives a reload), so tightening a policy cannot cut a tunnel that is already open, and `sandbox destroy` cuts it but throws away the sandbox.
+`sandbox quarantine` is the kill switch that keeps the evidence; automatic triggers are tracked in TODO.md.
+
+### Firewall
+A quarantined sandbox's `sb_<k>` is a single logged drop (`quarantined`) that comes before the `established` rule, so open flows stop in both directions at the next packet.
+Its `sbin_<k>` admits only DNS to its own proxy, so attempted lookups are still answered (REFUSED) and logged; the relay port is not admitted.
+Replies on forwarded flows would still reach the sandbox through the forward chain's `established` rule, so the base forward chain first drops anything leaving through an interface in the global set `quarantined`.
+`allow_<k>` and `direct_<k>` are emptied; the policy itself is kept, and `policy apply` during a quarantine stores and renders the new policy behind the quarantine.
+
+### Conntrack entries are deleted
+Dropping packets alone would leave the conntrack entries of cut flows in place (established TCP times out after five days by default), and a release would let them continue as established.
+Quarantine therefore deletes every entry whose original source is the sandbox's address.
+The flow collector logs each one from its DESTROY event, so the log shows exactly how much every cut flow had moved.
+
+### DNS proxy and relay
+The DNS proxy refuses every query before the allowlist and rate limiter, without forwarding, and logs each refusal: during an incident, every attempted name is evidence.
+The relay resets all of its connections and refuses new ones.
+On release the proxy forgets every address it learned, and the allow sets start empty, so nothing learned before the quarantine is reachable until it is resolved again.
+
+### Freeze
+`--freeze` pauses a VM through the Firecracker API, or SIGSTOPs every process in an exec sandbox's netns.
+SIGSTOP is repeated until a pass finds no new process, to catch forks during the first pass.
+An exec sandbox has no cgroup of its own, so SIGSTOP is the available freezer; another process running as `nobody` on the host could send SIGCONT, but a stopped process cannot reach the network while the quarantine holds.
+`vm snapshot` of a frozen VM leaves it paused, so a memory image can be taken for analysis without letting the guest run.
+
+### Persistence
+The quarantine (time, reason, frozen) is stored in the sandbox record, so a restarted daemon re-applies it before the sandbox's DNS proxy starts, and a VM restarted from its source is paused again if it was frozen.
+
+### Testing
+`test/e2e/quarantine.sh` cuts a forwarded and a relayed download in flight (the sandbox has a 2 Mbit ingress cap, so data is still on the wire when the cut happens; with only a client-side `--limit-rate`, a local endpoint fills the client's socket buffer within the first two seconds), and checks the logged flow bytes, refused and unforwarded DNS, dropped TCP and UDP, quarantine across `policy apply` and a daemon restart, freezing, release, and destroy while frozen.
+M3 checks that a quarantined guest is cut off and that `--freeze` pauses and `release` resumes the VM.

@@ -20,6 +20,8 @@ type Metrics struct {
 	// RelayConnections counts relay decisions: ok, denied, refused (by
 	// the upstream proxy) or error.
 	RelayConnections *prometheus.CounterVec
+	// Quarantined is 1 while a sandbox is quarantined.
+	Quarantined *prometheus.GaugeVec
 }
 
 // New registers all collectors.
@@ -41,8 +43,11 @@ func New() *Metrics {
 		RelayConnections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "egressd_relay_connections_total", Help: "Connections and HTTP requests through the relay (SNI/Host check, upstream proxy) by result.",
 		}, []string{"sandbox", "result"}),
+		Quarantined: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "egressd_quarantined", Help: "1 while the sandbox is quarantined.",
+		}, []string{"sandbox"}),
 	}
-	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections,
+	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections, m.Quarantined,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }
@@ -54,6 +59,7 @@ func (m *Metrics) Forget(sandboxID string) {
 	for _, v := range []*prometheus.CounterVec{m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections} {
 		v.DeletePartialMatch(l)
 	}
+	m.Quarantined.DeletePartialMatch(l)
 }
 
 // Handler serves the registry in the Prometheus exposition format.
