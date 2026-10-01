@@ -109,7 +109,7 @@ sudo bin/egressd vm clone /srv/snapshots/base --count 20 --policy demo/policy.ya
 ```
 
 `--vm-config` is a regular Firecracker config file without `network-interfaces`; egressd owns the network.
-Each VM runs as `jailer --netns /var/run/netns/sb<k>` under its own unprivileged uid, and the guest network comes from the kernel command line (`ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off`).
+Each VM runs as `jailer --netns /var/run/netns/sb<k>` under its own unprivileged uid (`--vm-uid-base`+k, default 2000000000+k; the daemon checks that nothing else on the host uses those ids), and the guest network comes from the kernel command line (`ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off`).
 Bandwidth limits are applied both by tc on the host and by Firecracker's own rate limiters.
 
 ### Behind an HTTP proxy
@@ -220,6 +220,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 - **Single host.** There is no fleet management, central UI or API authentication.
 
 Design decisions and deviations from the original plan, with the measurements behind them, are in [DECISIONS.md](DECISIONS.md).
+Open work and verification still owed are tracked in [TODO.md](TODO.md).
 
 ## Development
 

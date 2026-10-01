@@ -51,6 +51,11 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 				prefixes = append(prefixes, p.Masked())
 			}
 			paths.ChrootBase = g.chrootBase
+			if paths.Firecracker != "" || paths.Jailer != "" {
+				if err := paths.CheckUIDRange(); err != nil {
+					return err
+				}
+			}
 			for _, p := range []*string{&paths.Firecracker, &paths.Jailer} {
 				if *p == "" {
 					continue
@@ -86,6 +91,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().StringSliceVar(&exempt, "blocked-exempt", nil, "CIDRs to carve out of the blocked ranges (testing only)")
 	cmd.Flags().StringVar(&paths.Firecracker, "firecracker", "", "firecracker binary (enables vm mode)")
 	cmd.Flags().StringVar(&paths.Jailer, "jailer", "", "jailer binary (enables vm mode)")
+	cmd.Flags().IntVar(&paths.UIDBase, "vm-uid-base", fc.DefaultUIDBase, "VMMs run as uid/gid base+k; base+1..base+254 must be unused on the host")
 	cmd.Flags().StringVar(&proxyURL, "upstream-proxy", "", "carry allowed sandbox TCP through this HTTP proxy, http://[user:pass@]host:port")
 	cmd.Flags().BoolVar(&proxyEnv, "upstream-proxy-from-env", false, "take --upstream-proxy from https_proxy or http_proxy, and --no-proxy from no_proxy")
 	cmd.Flags().BoolVar(&sniCheck, "sni-check", true, "check the TLS SNI or HTTP Host of allowed connections to ports 80 and 443 against the allowlist (--sni-check=false to forward them unchecked)")

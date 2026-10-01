@@ -2,6 +2,8 @@ package fc
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -81,5 +83,31 @@ func TestParseVMConfigRejects(t *testing.T) {
 func TestLimiterZeroDisables(t *testing.T) {
 	if l := limiter(0); l.Bandwidth.Size != 0 || l.Bandwidth.RefillTime != 0 {
 		t.Errorf("zero limit = %+v", l)
+	}
+}
+
+func TestCheckIDRange(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	passwd := write("passwd", "root:x:0:0::/root:/bin/sh\njason:x:1000:1000::/home/jason:/bin/bash\n")
+	subuid := write("subuid", "jason:100000:65536\n")
+	files := map[string]string{passwd: "passwd", subuid: "sub", filepath.Join(dir, "missing"): "sub"}
+	if err := checkIDRange(DefaultUIDBase, files); err != nil {
+		t.Errorf("default base: %v", err)
+	}
+	if err := checkIDRange(100000, files); err == nil || !strings.Contains(err.Error(), "jason:100000:65536") {
+		t.Errorf("subuid overlap not reported: %v", err)
+	}
+	if err := checkIDRange(999, files); err == nil {
+		t.Error("ids overlapping user 1000 accepted")
+	}
+	if err := checkIDRange(maxID-10, files); err == nil {
+		t.Error("ids above 2^31-1 accepted")
 	}
 }

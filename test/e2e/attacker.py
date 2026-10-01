@@ -8,6 +8,8 @@ HTTP on --port:
 
 Optional:
   --hold-port P     accept TCP connections and hold them open (conn limits)
+  --udp-port P      append every UDP datagram to --loot as "udp: <payload>"
+                    (delivery evidence for forwarded UDP)
   --dns-port P      answer UDP DNS for --dns-zone and its subdomains with
                     --bind's address, NXDOMAIN for anything else; every
                     query name is appended to --loot (DNS exfiltration evidence)
@@ -132,6 +134,15 @@ def dns_server(addr, port, zone, loot_path):
         s.sendto(header + question + answer, peer)
 
 
+def udp_sink(addr, port, loot_path):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind((addr, port))
+    while True:
+        data, _ = s.recvfrom(65535)
+        with open(loot_path, "a") as f:
+            f.write("udp: %s\n" % data.decode("utf-8", "replace").strip())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bind", required=True)
@@ -139,11 +150,14 @@ def main():
     ap.add_argument("--loot", required=True, help="file that receives POST bodies")
     ap.add_argument("--hold-port", type=int)
     ap.add_argument("--dns-port", type=int)
+    ap.add_argument("--udp-port", type=int)
     ap.add_argument("--dns-zone", default="attacker.test")
     args = ap.parse_args()
     Handler.loot_path = args.loot
     if args.hold_port:
         threading.Thread(target=hold_server, args=(args.bind, args.hold_port), daemon=True).start()
+    if args.udp_port:
+        threading.Thread(target=udp_sink, args=(args.bind, args.udp_port, args.loot), daemon=True).start()
     if args.dns_port:
         threading.Thread(target=dns_server, args=(args.bind, args.dns_port, args.dns_zone, args.loot), daemon=True).start()
     with Server((args.bind, args.port), Handler) as srv:

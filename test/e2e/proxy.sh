@@ -54,7 +54,7 @@ wait_log t1 "proxy_refused logged with the proxy's status" '.type=="relay" and .
 log "what the proxy does not change"
 expect_fail "relay port not reachable directly" sbx t1 curl -sS -m 3 "http://$relay_addr:15001/"
 wait_log t1 "direct relay access is host_access" '.type=="deny" and .dst_port==15001 and .reason=="host_access"'
-sbx t1 bash -c "echo x >/dev/udp/$A/9999"
+udp_not_delivered t1 "allowed UDP not delivered"
 wait_log t1 "allowed UDP rejected as no_proxy_route" \
 	".type==\"deny\" and .proto==\"udp\" and .dst_ip==\"$A\" and .reason==\"no_proxy_route\""
 expect_fail "non-allowlisted address still dropped" sbx t1 curl -sS -m 3 http://203.0.113.10/
@@ -85,19 +85,16 @@ k=$(sb_field t1 .index)
 direct_set() { nft -j list set inet egressd "direct_$k" | jq -r '[.nftables[].set.elem // empty | .[] | (.elem.val // .)] | join(" ")'; }
 
 # direct_ok <desc>: b.attacker.test fetched without the proxy or the relay
-# seeing it, and allowed UDP is not rejected as no_proxy_route.
+# seeing it, and allowed UDP delivered.
 direct_ok() {
-	local plines relayed udp_rejects
+	local plines relayed
 	plines=$(wc -l <"$PLOG")
 	relayed=$(count_events t1 '.type=="relay"')
-	udp_rejects=$(count_events t1 '.reason=="no_proxy_route"')
 	expect_eq "$1: curl succeeds" \
 		"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
 	expect_eq "$1: the proxy saw nothing" "$(wc -l <"$PLOG")" "$plines"
 	expect_eq "$1: the relay saw nothing" "$(count_events t1 '.type=="relay"')" "$relayed"
-	sbx t1 bash -c "echo x >/dev/udp/$A/9999"
-	sleep 1
-	expect_eq "$1: allowed UDP not rejected" "$(count_events t1 '.reason=="no_proxy_route"')" "$udp_rejects"
+	udp_delivered t1 "$1: allowed UDP delivered"
 }
 
 log "no_proxy by address"

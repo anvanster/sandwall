@@ -27,8 +27,11 @@ import (
 // Defaults for the Firecracker binaries and jail location.
 const (
 	DefaultChrootBase = "/srv/jailer"
-	// UIDBase + k is the unprivileged uid/gid each sandbox's VMM runs as.
-	UIDBase = 100000
+	// DefaultUIDBase + k is the unprivileged uid/gid each sandbox's VMM
+	// runs as. It sits far above the ranges distributions hand out in
+	// /etc/subuid (100000 + n*65536), which rootless containers run as;
+	// CheckUIDRange verifies the actual host.
+	DefaultUIDBase = 2_000_000_000
 
 	apiReadyTimeout = 10 * time.Second
 	apiCallTimeout  = 60 * time.Second
@@ -45,6 +48,8 @@ type Paths struct {
 	Firecracker string
 	Jailer      string
 	ChrootBase  string
+	// UIDBase overrides DefaultUIDBase when non-zero.
+	UIDBase int
 }
 
 // VM is one sandbox's microVM.
@@ -59,7 +64,14 @@ type VM struct {
 func JailID(k int) string { return fmt.Sprintf("egressd-sb%d", k) }
 
 // UID is the uid and gid the VMM runs as.
-func (v VM) UID() int { return UIDBase + v.Sandbox.Index }
+func (v VM) UID() int { return v.Paths.uidBase() + v.Sandbox.Index }
+
+func (p Paths) uidBase() int {
+	if p.UIDBase != 0 {
+		return p.UIDBase
+	}
+	return DefaultUIDBase
+}
 
 func (v VM) jailDir() string {
 	return filepath.Join(v.Paths.ChrootBase, filepath.Base(v.Paths.Firecracker), JailID(v.Sandbox.Index))

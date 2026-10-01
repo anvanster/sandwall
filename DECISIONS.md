@@ -131,7 +131,12 @@ The host reaches a guest over SSH from inside its netns (the e2e harness's contr
 Replies come back through the `established` rule.
 
 ### Jail layout and identity
-Each VM runs as `jailer --id egressd-sb<k> --netns /var/run/netns/sb<k>`, under uid/gid `100000+k`, in its own chroot under `--chroot-base` (default `/srv/jailer`).
+Each VM runs as `jailer --id egressd-sb<k> --netns /var/run/netns/sb<k>`, under uid/gid `base+k`, in its own chroot under `--chroot-base` (default `/srv/jailer`).
+
+The base was originally 100000, which is where distributions start the subordinate ranges in `/etc/subuid` and `/etc/subgid`.
+A rootless container of the first regular user would run with the same ids as a VMM and could open its jail files.
+The default base is now 2000000000 (ids stay below 2^31), configurable with `daemon --vm-uid-base`, and the daemon refuses to start in VM mode if any id in `base+1..base+254` belongs to a user or group, or lies in a subordinate range.
+A VM that was already running when the daemon is upgraded keeps its old uid until it is restarted.
 Every jail uses the same names: `vmlinux`, `drive-<id>`, `tap0`, guest MAC `06:00:AC:10:00:02` and guest IP `172.16.0.2`.
 So a snapshot from any sandbox restores unchanged in any other.
 `--vm-config` is a Firecracker config file without `network-interfaces`, which egressd owns.

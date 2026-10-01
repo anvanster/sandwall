@@ -15,6 +15,11 @@ log "setup"
 egressd nuke >/dev/null
 setup_attacker || exit 1
 start_iperf 5201
+# VMMs must not share ids with rootless containers (subordinate ranges).
+if sub=$(awk -F: 'NF == 3 {print $2; exit}' /etc/subuid 2>/dev/null) && [[ -n "$sub" ]]; then
+	out=$(timeout 5 "$EGRESSD" "${G[@]}" daemon "${FC_FLAGS[@]}" --vm-uid-base "$((sub - 1))" 2>&1)
+	expect_ok "daemon refuses VMM ids overlapping /etc/subuid" grep -q "overlaps the VMM ids" <<<"$out"
+fi
 start_daemon "${FC_FLAGS[@]}" || exit 1
 expect_fail "vm mode needs --vm-config" egressd sandbox create nocfg --mode vm --policy "$P/m1.yaml"
 expect_ok "create VM sandbox v1" egressd sandbox create v1 --mode vm --vm-config "$FC_ASSETS/fc.json" --policy "$P/m1.yaml"
@@ -22,7 +27,7 @@ expect_ok "guest reachable" wait_guest v1
 ns=$(sb_field v1 .netns)
 fc_pid=$(pgrep -f 'firecracker --id egressd-sb1')
 expect_eq "firecracker runs inside the sandbox netns (jailer --netns)" "$(ip netns identify "$fc_pid")" "$ns"
-expect_eq "firecracker runs unprivileged" "$(ps -o uid= -p "$fc_pid" | tr -d ' ')" 100001
+expect_eq "firecracker runs unprivileged" "$(ps -o uid= -p "$fc_pid" | tr -d ' ')" 2000000001
 expect_eq "guest IP from kernel cmdline" "$(vmx v1 ip -4 -o addr show eth0 | awk '{print $4}')" 172.16.0.2/30
 expect_eq "guest resolver is tap0 side" "$(vmx v1 "awk '/^nameserver/ {print \$2}' /etc/resolv.conf")" 172.16.0.1
 expect_eq "IPv6 disabled in guest" "$(vmx v1 test -e /proc/sys/net/ipv6 && echo on || echo off)" off

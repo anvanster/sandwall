@@ -43,9 +43,7 @@ log "scope of the check"
 sbx t1 bash -c "echo x >/dev/udp/$A/443"
 wait_log t1 "QUIC to a DNS-learned address rejected" \
 	".type==\"deny\" and .proto==\"udp\" and .dst_port==443 and .reason==\"quic_blocked\""
-sbx t1 bash -c "echo x >/dev/udp/$A/9999"
-sleep 1
-expect_eq "other UDP to an allowed address is not rejected" "$(count_events t1 '.type=="deny" and .dst_port==9999')" 0
+udp_delivered t1 "other UDP to an allowed address delivered"
 relayed=$(count_events t1 '.type=="relay"')
 expect_eq "other TCP ports are not checked" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' -H 'Host: evil.test' "http://a.attacker.test:$ATTACKER_PORT/")" 200
