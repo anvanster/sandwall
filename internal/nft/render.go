@@ -1,9 +1,9 @@
-// Package nft renders egressd's nftables ruleset as text and applies it
-// atomically with `nft -f`. egressd only ever touches `table inet egressd`.
+// Package nft renders sandwall's nftables ruleset as text and applies it
+// atomically with `nft -f`. sandwall only ever touches `table inet sandwall`.
 //
 // Layout:
 //
-//	table inet egressd
+//	table inet sandwall
 //	  set blocked_ranges, blocked_exempt        (global, interval)
 //	  set direct_cidrs                          (global, interval) no_proxy CIDRs
 //	  set quarantined                           (global) host veths of quarantined sandboxes
@@ -33,17 +33,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anvanster/egressd/internal/addressing"
+	"github.com/anvanster/sandwall/internal/addressing"
 )
 
-// Table is the only nftables table egressd owns.
-const Table = "egressd"
+// Table is the only nftables table sandwall owns.
+const Table = "sandwall"
 
 // LogGroup is the NFLOG group deny rules log to.
 const LogGroup = 1
 
-// LogPrefixPrefix starts every egressd NFLOG prefix: "egressd:<k>:<reason> ".
-const LogPrefixPrefix = "egressd:"
+// LogPrefixPrefix starts every sandwall NFLOG prefix: "sandwall:<k>:<reason> ".
+const LogPrefixPrefix = "sandwall:"
 
 // Deny reasons carried in the NFLOG prefix.
 const (
@@ -456,7 +456,7 @@ func RenderAllow(k int, entries []AllowEntry, direct bool) string {
 	return b.String()
 }
 
-// RenderDeleteTable removes everything egressd ever created in nftables.
+// RenderDeleteTable removes everything sandwall ever created in nftables.
 func RenderDeleteTable() string {
 	return fmt.Sprintf("add table inet %s\ndelete table inet %s\n", Table, Table)
 }
@@ -512,8 +512,8 @@ func joinAddrs(entries []AllowEntry) string {
 	return strings.Join(s, ", ")
 }
 
-// NetnsTable is the table egressd owns inside a VM-mode sandbox netns.
-const NetnsTable = "egressd_vm"
+// NetnsTable is the table sandwall owns inside a VM-mode sandbox netns.
+const NetnsTable = "sandwall_vm"
 
 // RenderVMNetns renders the ruleset inside a VM-mode sandbox's netns:
 //   - guest DNS to 172.16.0.1 is DNATed to the sandbox's proxy;

@@ -1,42 +1,42 @@
-add table inet egressd
-add set inet egressd blocked_ranges { type ipv4_addr; flags interval; auto-merge; }
-add set inet egressd blocked_exempt { type ipv4_addr; flags interval; auto-merge; }
-add map inet egressd pre_vmap { type ifname : verdict; }
-add map inet egressd in_vmap { type ifname : verdict; }
-add map inet egressd nat_vmap { type ifname : verdict; }
-add set inet egressd direct_cidrs { type ipv4_addr; flags interval; auto-merge; }
-add set inet egressd quarantined { type ifname; }
-add chain inet egressd conn_reject
-flush chain inet egressd conn_reject
-add rule inet egressd conn_reject meta l4proto tcp reject with tcp reset
-add rule inet egressd conn_reject reject with icmpx admin-prohibited
-flush set inet egressd blocked_ranges
-add element inet egressd blocked_ranges { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }
-flush set inet egressd blocked_exempt
-add element inet egressd blocked_exempt { 10.99.0.0/24 }
-flush set inet egressd direct_cidrs
-add chain inet egressd prerouting { type filter hook prerouting priority -150; policy accept; }
-flush chain inet egressd prerouting
-add rule inet egressd prerouting iifname "veth-h*" fib daddr type { local, broadcast, multicast } accept
-add rule inet egressd prerouting iifname vmap @pre_vmap
-add rule inet egressd prerouting iifname "veth-h*" counter log group 1 prefix "egressd:0:unknown_iface " drop
-add chain inet egressd proxy_redirect { type nat hook prerouting priority dstnat; policy accept; }
-flush chain inet egressd proxy_redirect
-delete chain inet egressd proxy_redirect
-add chain inet egressd relay_redirect { type nat hook prerouting priority dstnat; policy accept; }
-flush chain inet egressd relay_redirect
-add chain inet egressd forward { type filter hook forward priority filter; policy accept; }
-flush chain inet egressd forward
-add map inet egressd fwd_vmap { type ifname : verdict; }
-delete map inet egressd fwd_vmap
-add rule inet egressd forward oifname @quarantined counter drop
-add rule inet egressd forward oifname "veth-h*" ct state established,related accept
-add rule inet egressd forward oifname "veth-h*" counter drop
-add chain inet egressd input { type filter hook input priority filter; policy accept; }
-flush chain inet egressd input
-add rule inet egressd input iifname "veth-h*" meta pkttype { broadcast, multicast } fib saddr type local accept
-add rule inet egressd input iifname vmap @in_vmap
-add rule inet egressd input iifname "veth-h*" counter log group 1 prefix "egressd:0:unknown_iface " drop
-add chain inet egressd postrouting { type nat hook postrouting priority srcnat; policy accept; }
-flush chain inet egressd postrouting
-add rule inet egressd postrouting ip saddr 10.200.0.0/16 oifname != "veth-h*" masquerade
+add table inet sandwall
+add set inet sandwall blocked_ranges { type ipv4_addr; flags interval; auto-merge; }
+add set inet sandwall blocked_exempt { type ipv4_addr; flags interval; auto-merge; }
+add map inet sandwall pre_vmap { type ifname : verdict; }
+add map inet sandwall in_vmap { type ifname : verdict; }
+add map inet sandwall nat_vmap { type ifname : verdict; }
+add set inet sandwall direct_cidrs { type ipv4_addr; flags interval; auto-merge; }
+add set inet sandwall quarantined { type ifname; }
+add chain inet sandwall conn_reject
+flush chain inet sandwall conn_reject
+add rule inet sandwall conn_reject meta l4proto tcp reject with tcp reset
+add rule inet sandwall conn_reject reject with icmpx admin-prohibited
+flush set inet sandwall blocked_ranges
+add element inet sandwall blocked_ranges { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }
+flush set inet sandwall blocked_exempt
+add element inet sandwall blocked_exempt { 10.99.0.0/24 }
+flush set inet sandwall direct_cidrs
+add chain inet sandwall prerouting { type filter hook prerouting priority -150; policy accept; }
+flush chain inet sandwall prerouting
+add rule inet sandwall prerouting iifname "veth-h*" fib daddr type { local, broadcast, multicast } accept
+add rule inet sandwall prerouting iifname vmap @pre_vmap
+add rule inet sandwall prerouting iifname "veth-h*" counter log group 1 prefix "sandwall:0:unknown_iface " drop
+add chain inet sandwall proxy_redirect { type nat hook prerouting priority dstnat; policy accept; }
+flush chain inet sandwall proxy_redirect
+delete chain inet sandwall proxy_redirect
+add chain inet sandwall relay_redirect { type nat hook prerouting priority dstnat; policy accept; }
+flush chain inet sandwall relay_redirect
+add chain inet sandwall forward { type filter hook forward priority filter; policy accept; }
+flush chain inet sandwall forward
+add map inet sandwall fwd_vmap { type ifname : verdict; }
+delete map inet sandwall fwd_vmap
+add rule inet sandwall forward oifname @quarantined counter drop
+add rule inet sandwall forward oifname "veth-h*" ct state established,related accept
+add rule inet sandwall forward oifname "veth-h*" counter drop
+add chain inet sandwall input { type filter hook input priority filter; policy accept; }
+flush chain inet sandwall input
+add rule inet sandwall input iifname "veth-h*" meta pkttype { broadcast, multicast } fib saddr type local accept
+add rule inet sandwall input iifname vmap @in_vmap
+add rule inet sandwall input iifname "veth-h*" counter log group 1 prefix "sandwall:0:unknown_iface " drop
+add chain inet sandwall postrouting { type nat hook postrouting priority srcnat; policy accept; }
+flush chain inet sandwall postrouting
+add rule inet sandwall postrouting ip saddr 10.200.0.0/16 oifname != "veth-h*" masquerade

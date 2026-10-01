@@ -19,8 +19,8 @@ import (
 	"github.com/miekg/dns"
 	"golang.org/x/time/rate"
 
-	"github.com/anvanster/egressd/internal/flowlog"
-	"github.com/anvanster/egressd/internal/nft"
+	"github.com/anvanster/sandwall/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/nft"
 )
 
 // TTL handling: answers are clamped to MaxTTL; set entries live for

@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/anvanster/egressd/internal/addressing"
+	"github.com/anvanster/sandwall/internal/addressing"
 )
 
 // Defaults for the Firecracker binaries and jail location.
@@ -41,7 +41,7 @@ const (
 	snapshotMeta    = "meta.json"
 )
 
-var jailPattern = regexp.MustCompile(`^egressd-sb([0-9]+)$`)
+var jailPattern = regexp.MustCompile(`^sandwall-sb([0-9]+)$`)
 
 // Paths locates the Firecracker binaries and the jailer chroot base.
 type Paths struct {
@@ -61,7 +61,7 @@ type VM struct {
 }
 
 // JailID is the jailer --id for sandbox k.
-func JailID(k int) string { return fmt.Sprintf("egressd-sb%d", k) }
+func JailID(k int) string { return fmt.Sprintf("sandwall-sb%d", k) }
 
 // UID is the uid and gid the VMM runs as.
 func (v VM) UID() int { return v.Paths.uidBase() + v.Sandbox.Index }
@@ -185,7 +185,7 @@ func ReadSnapshotMeta(dir string) (SnapshotMeta, error) {
 	var meta SnapshotMeta
 	data, err := os.ReadFile(filepath.Join(dir, snapshotMeta))
 	if err != nil {
-		return meta, fmt.Errorf("not an egressd snapshot directory: %w", err)
+		return meta, fmt.Errorf("not an sandwall snapshot directory: %w", err)
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return meta, fmt.Errorf("%s: %w", snapshotMeta, err)
@@ -281,7 +281,7 @@ func (v VM) Stop() error {
 	return removeJail(v.jailDir())
 }
 
-// CleanupJails removes every egressd jail directory under chrootBase (all
+// CleanupJails removes every sandwall jail directory under chrootBase (all
 // exec-file names), killing VMMs still recorded in them.
 func CleanupJails(chrootBase string) error {
 	if chrootBase == "" {

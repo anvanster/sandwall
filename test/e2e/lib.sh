@@ -1,9 +1,9 @@
-# Shared helpers for egressd end-to-end tests. Source from a test script.
+# Shared helpers for sandwall end-to-end tests. Source from a test script.
 # Requires root, a Linux host, nft, iproute2, tcpdump, dig, curl, jq, python3.
 
 set -uo pipefail
 
-: "${EGRESSD:?set EGRESSD to the egressd binary}"
+: "${SANDWALL:?set SANDWALL to the sandwall binary}"
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # E2E_TMP: where the per-run directory (state, logs, snapshots) goes. For VM
@@ -12,13 +12,13 @@ E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_TMP=${E2E_TMP:-/tmp}
 CHROOT_BASE=${CHROOT_BASE:-/srv/jailer}
 mkdir -p "$E2E_TMP"
-T="$(mktemp -d "$E2E_TMP/egressd-e2e.XXXXXX")"
+T="$(mktemp -d "$E2E_TMP/sandwall-e2e.XXXXXX")"
 # Sandbox commands run as nobody, which may not be able to read the checkout
 # (a 0750 home directory, say), so helpers they run are copied here.
-SBX_DIR="$(mktemp -d "$E2E_TMP/egressd-sbx.XXXXXX")"
+SBX_DIR="$(mktemp -d "$E2E_TMP/sandwall-sbx.XXXXXX")"
 chmod 0755 "$SBX_DIR"
 install -m 0644 "$E2E_DIR/conns.py" "$SBX_DIR/"
-SOCK="$T/egressd.sock"
+SOCK="$T/sandwall.sock"
 STATE="$T/state"
 LOGS="$T/logs"
 G=(--socket "$SOCK" --state-dir "$STATE" --log-dir "$LOGS" --chroot-base "$CHROOT_BASE")
@@ -44,8 +44,8 @@ log()  { printf '\n== %s\n' "$*"; }
 pass() { printf '  ok    %s\n' "$*"; PASS=$((PASS + 1)); }
 fail() { printf '  FAIL  %s\n' "$*"; FAIL=$((FAIL + 1)); }
 
-egressd() { "$EGRESSD" "${G[@]}" "$@"; }
-sbx() { local id=$1; shift; egressd sandbox exec "$id" -- "$@"; }
+sandwall() { "$SANDWALL" "${G[@]}" "$@"; }
+sbx() { local id=$1; shift; sandwall sandbox exec "$id" -- "$@"; }
 
 # dns_status <sandbox> <dig args...>: the response status (NOERROR, REFUSED,
 # ...) or empty if no answer arrived.
@@ -98,11 +98,11 @@ start_daemon() {
 	if [[ -n "$REAL_PROXY" && " $* " != *" --upstream-proxy "* ]]; then
 		extra=(--upstream-proxy "$REAL_PROXY" --no-proxy 10.99.0.0/24)
 	fi
-	"$EGRESSD" "${G[@]}" daemon --blocked-exempt 10.99.0.0/24 --metrics-addr 127.0.0.1:19464 "${extra[@]}" "$@" \
+	"$SANDWALL" "${G[@]}" daemon --blocked-exempt 10.99.0.0/24 --metrics-addr 127.0.0.1:19464 "${extra[@]}" "$@" \
 		>>"$T/daemon.log" 2>&1 &
 	DAEMON_PID=$!
 	for _ in $(seq 50); do
-		[[ -S "$SOCK" ]] && egressd sandbox list >/dev/null 2>&1 && return 0
+		[[ -S "$SOCK" ]] && sandwall sandbox list >/dev/null 2>&1 && return 0
 		sleep 0.1
 	done
 	echo "daemon failed to start:" >&2
@@ -182,10 +182,10 @@ teardown_attacker() {
 
 # --- VM mode -------------------------------------------------------------
 
-FC_ASSETS=${FC_ASSETS:-/var/lib/egressd-fc}
+FC_ASSETS=${FC_ASSETS:-/var/lib/sandwall-fc}
 FC_FLAGS=(--firecracker "$FC_ASSETS/firecracker" --jailer "$FC_ASSETS/jailer")
 
-sb_field() { egressd sandbox list --json | jq -r --arg id "$1" ".[] | select(.id==\$id) | $2"; }
+sb_field() { sandwall sandbox list --json | jq -r --arg id "$1" ".[] | select(.id==\$id) | $2"; }
 
 # vmx <id> <remote command>: run a command in the sandbox's guest over SSH
 # from inside its netns (the netns reaches the guest directly on tap0).
@@ -237,21 +237,21 @@ udp_not_delivered() {
 	if grep -q "^udp: $token\$" "$ATTACKER_LOOT"; then fail "$2 (datagram $token arrived)"; else pass "$2"; fi
 }
 
-# assert_no_remnants: nothing egressd-owned is left on the host.
+# assert_no_remnants: nothing sandwall-owned is left on the host.
 assert_no_remnants() {
 	expect_eq "no sb<k> netns left" "$(ip netns list | grep -cE '^sb[0-9]+')" 0
 	expect_eq "no veth-h<k> links left" "$(ip -o link | grep -cE ' veth-[hs][0-9]+')" 0
 	expect_eq "no eg-ifb<k> links left" "$(ip -o link | grep -cE ' eg-ifb[0-9]+')" 0
-	expect_eq "no egressd nft table left" "$(nft list tables | grep -c egressd)" 0
+	expect_eq "no sandwall nft table left" "$(nft list tables | grep -c sandwall)" 0
 	expect_eq "no tc qdiscs on sandbox veths" "$(tc qdisc show | grep -c veth-h)" 0
 	expect_eq "no /etc/netns/sb<k> left" "$(find /etc/netns -maxdepth 1 -name 'sb[0-9]*' 2>/dev/null | wc -l)" 0
-	expect_eq "no firecracker processes left" "$(pgrep -c -f 'firecracker --id egressd-sb' || true)" 0
-	expect_eq "no egressd jails left" "$(find "$CHROOT_BASE" -mindepth 2 -maxdepth 2 -name 'egressd-sb*' 2>/dev/null | wc -l)" 0
+	expect_eq "no firecracker processes left" "$(pgrep -c -f 'firecracker --id sandwall-sb' || true)" 0
+	expect_eq "no sandwall jails left" "$(find "$CHROOT_BASE" -mindepth 2 -maxdepth 2 -name 'sandwall-sb*' 2>/dev/null | wc -l)" 0
 }
 
 finish() {
 	stop_daemon
-	"$EGRESSD" "${G[@]}" nuke >/dev/null 2>&1
+	"$SANDWALL" "${G[@]}" nuke >/dev/null 2>&1
 	teardown_attacker
 	rm -rf "$SBX_DIR"
 	printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

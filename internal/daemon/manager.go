@@ -22,16 +22,16 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/anvanster/egressd/internal/addressing"
-	"github.com/anvanster/egressd/internal/dnsproxy"
-	"github.com/anvanster/egressd/internal/fc"
-	"github.com/anvanster/egressd/internal/flowlog"
-	"github.com/anvanster/egressd/internal/metrics"
-	"github.com/anvanster/egressd/internal/netns"
-	"github.com/anvanster/egressd/internal/nft"
-	"github.com/anvanster/egressd/internal/policy"
-	"github.com/anvanster/egressd/internal/relay"
-	"github.com/anvanster/egressd/internal/shaper"
+	"github.com/anvanster/sandwall/internal/addressing"
+	"github.com/anvanster/sandwall/internal/dnsproxy"
+	"github.com/anvanster/sandwall/internal/fc"
+	"github.com/anvanster/sandwall/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/metrics"
+	"github.com/anvanster/sandwall/internal/netns"
+	"github.com/anvanster/sandwall/internal/nft"
+	"github.com/anvanster/sandwall/internal/policy"
+	"github.com/anvanster/sandwall/internal/relay"
+	"github.com/anvanster/sandwall/internal/shaper"
 )
 
 // Sandbox modes.
@@ -42,8 +42,8 @@ const (
 
 // Default filesystem locations.
 const (
-	DefaultStateDir = "/var/lib/egressd"
-	DefaultLogDir   = "/var/log/egressd"
+	DefaultStateDir = "/var/lib/sandwall"
+	DefaultLogDir   = "/var/log/sandwall"
 )
 
 // MaxClones bounds one clone request.
@@ -898,7 +898,7 @@ func (mgr *Manager) teardown(ctx context.Context, id string, sb addressing.Sandb
 	return errors.Join(errs...)
 }
 
-// Nuke stops every sandbox the daemon knows about and removes all egressd
+// Nuke stops every sandbox the daemon knows about and removes all sandwall
 // state from the host, including leftovers it does not know about.
 func (mgr *Manager) Nuke(ctx context.Context) error {
 	mgr.opMu.Lock()
@@ -916,7 +916,7 @@ func (mgr *Manager) Nuke(ctx context.Context) error {
 	return Cleanup(ctx, mgr.opts.StateDir, mgr.opts.FC.ChrootBase)
 }
 
-// Cleanup removes all egressd VMs and jails, netns, veths, IFBs,
+// Cleanup removes all sandwall VMs and jails, netns, veths, IFBs,
 // /etc/netns entries, the nft table and persisted records, then restores
 // host sysctls. It needs no running daemon and is idempotent.
 func Cleanup(ctx context.Context, stateDir, chrootBase string) error {

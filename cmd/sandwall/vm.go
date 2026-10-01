@@ -13,8 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anvanster/egressd/internal/api"
-	"github.com/anvanster/egressd/internal/daemon"
+	"github.com/anvanster/sandwall/internal/api"
+	"github.com/anvanster/sandwall/internal/daemon"
 )
 
 func newVMCmd(g *globalFlags) *cobra.Command {

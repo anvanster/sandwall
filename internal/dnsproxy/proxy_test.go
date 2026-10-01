@@ -12,8 +12,8 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/anvanster/egressd/internal/flowlog"
-	"github.com/anvanster/egressd/internal/nft"
+	"github.com/anvanster/sandwall/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/nft"
 )
 
 // fakeUpstream answers every A query with two records and a CNAME, plus an

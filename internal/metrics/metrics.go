@@ -1,4 +1,4 @@
-// Package metrics exposes egressd's Prometheus metrics. Every series carries
+// Package metrics exposes sandwall's Prometheus metrics. Every series carries
 // a "sandbox" label holding the sandbox ID.
 package metrics
 
@@ -10,7 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Metrics holds the egressd collectors on a private registry.
+// Metrics holds the sandwall collectors on a private registry.
 type Metrics struct {
 	reg        *prometheus.Registry
 	Flows      *prometheus.CounterVec
@@ -29,22 +29,22 @@ func New() *Metrics {
 	m := &Metrics{
 		reg: prometheus.NewRegistry(),
 		Flows: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "egressd_flows_total", Help: "Finished flows by verdict.",
+			Name: "sandwall_flows_total", Help: "Finished flows by verdict.",
 		}, []string{"sandbox", "verdict"}),
 		Bytes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "egressd_bytes_total", Help: "Bytes by direction (out = sandbox to world).",
+			Name: "sandwall_bytes_total", Help: "Bytes by direction (out = sandbox to world).",
 		}, []string{"sandbox", "direction"}),
 		DNSQueries: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "egressd_dns_queries_total", Help: "DNS queries by verdict.",
+			Name: "sandwall_dns_queries_total", Help: "DNS queries by verdict.",
 		}, []string{"sandbox", "verdict"}),
 		Denied: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "egressd_denied_total", Help: "Packets dropped or rejected by reason.",
+			Name: "sandwall_denied_total", Help: "Packets dropped or rejected by reason.",
 		}, []string{"sandbox", "reason"}),
 		RelayConnections: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "egressd_relay_connections_total", Help: "Connections and HTTP requests through the relay (SNI/Host check, upstream proxy) by result.",
+			Name: "sandwall_relay_connections_total", Help: "Connections and HTTP requests through the relay (SNI/Host check, upstream proxy) by result.",
 		}, []string{"sandbox", "result"}),
 		Quarantined: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "egressd_quarantined", Help: "1 while the sandbox is quarantined.",
+			Name: "sandwall_quarantined", Help: "1 while the sandbox is quarantined.",
 		}, []string{"sandbox"}),
 	}
 	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections, m.Quarantined,

@@ -142,7 +142,7 @@ func TestLogPrefixRoundTrip(t *testing.T) {
 	if !ok || k != 42 || reason != ReasonDNSBypass {
 		t.Errorf("round trip = %d %q %v", k, reason, ok)
 	}
-	for _, bad := range []string{"", "foo:1:x ", "egressd:", "egressd:x:y ", "egressd:1: "} {
+	for _, bad := range []string{"", "foo:1:x ", "sandwall:", "sandwall:x:y ", "sandwall:1: "} {
 		if _, _, ok := ParseLogPrefix(bad); ok {
 			t.Errorf("ParseLogPrefix(%q) accepted", bad)
 		}
@@ -165,10 +165,10 @@ func TestRenderSandboxPreserveAndResetDirect(t *testing.T) {
 		}
 		return got
 	}
-	if s := render(false); strings.Contains(s, "flush set inet egressd allow_7") || strings.Contains(s, "flush set inet egressd direct_7") {
+	if s := render(false); strings.Contains(s, "flush set inet sandwall allow_7") || strings.Contains(s, "flush set inet sandwall direct_7") {
 		t.Error("preserving restore flushed a DNS-learned set")
 	}
-	if s := render(true); strings.Contains(s, "flush set inet egressd allow_7") || !strings.Contains(s, "flush set inet egressd direct_7") {
+	if s := render(true); strings.Contains(s, "flush set inet sandwall allow_7") || !strings.Contains(s, "flush set inet sandwall direct_7") {
 		t.Error("ResetDirect must flush direct_7 and only direct_7")
 	}
 }

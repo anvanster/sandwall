@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/anvanster/egressd/internal/addressing"
+	"github.com/anvanster/sandwall/internal/addressing"
 )
 
 // maxID keeps VMM ids below 2^31, which some tools treat as signed.

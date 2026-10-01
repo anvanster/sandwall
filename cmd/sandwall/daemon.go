@@ -15,12 +15,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anvanster/egressd/internal/api"
-	"github.com/anvanster/egressd/internal/daemon"
-	"github.com/anvanster/egressd/internal/fc"
-	"github.com/anvanster/egressd/internal/flowlog"
-	"github.com/anvanster/egressd/internal/metrics"
-	"github.com/anvanster/egressd/internal/relay"
+	"github.com/anvanster/sandwall/internal/api"
+	"github.com/anvanster/sandwall/internal/daemon"
+	"github.com/anvanster/sandwall/internal/fc"
+	"github.com/anvanster/sandwall/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/metrics"
+	"github.com/anvanster/sandwall/internal/relay"
 )
 
 func newDaemonCmd(g *globalFlags) *cobra.Command {
@@ -197,7 +197,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 
 	go func() { errc <- wrap("api", api.Serve(ctx, g.socket, api.NewHandler(mgr))) }()
 
-	log.Info("egressd daemon started", "socket", g.socket, "metrics", metricsAddr, "sandboxes", len(mgr.List()))
+	log.Info("sandwall daemon started", "socket", g.socket, "metrics", metricsAddr, "sandboxes", len(mgr.List()))
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down; sandboxes stay in place and are restored on next start")

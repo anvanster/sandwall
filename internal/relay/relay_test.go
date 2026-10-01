@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anvanster/egressd/internal/dnsproxy"
-	"github.com/anvanster/egressd/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/dnsproxy"
+	"github.com/anvanster/sandwall/internal/flowlog"
 )
 
 // fakeProxy is an upstream HTTP proxy. CONNECT targets get `status`; on 200

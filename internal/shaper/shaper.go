@@ -27,7 +27,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
-	"github.com/anvanster/egressd/internal/addressing"
+	"github.com/anvanster/sandwall/internal/addressing"
 )
 
 const (

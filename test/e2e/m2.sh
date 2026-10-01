@@ -7,13 +7,13 @@ P="$E2E_DIR/policies"
 A="$ATTACKER_IP"
 
 log "setup"
-egressd nuke >/dev/null
+sandwall nuke >/dev/null
 setup_attacker || exit 1
 start_iperf 5201 5202 5203
 start_daemon || exit 1
-expect_ok "create t1 (10mbit up / 20mbit down)" egressd sandbox create t1 --policy "$P/m2-shaped.yaml"
-expect_ok "create t2 (200mbit)" egressd sandbox create t2 --policy "$P/m2-fast.yaml"
-expect_ok "create t3 (max_conns 64)" egressd sandbox create t3 --policy "$P/m2-conns.yaml"
+expect_ok "create t1 (10mbit up / 20mbit down)" sandwall sandbox create t1 --policy "$P/m2-shaped.yaml"
+expect_ok "create t2 (200mbit)" sandwall sandbox create t2 --policy "$P/m2-fast.yaml"
+expect_ok "create t3 (max_conns 64)" sandwall sandbox create t3 --policy "$P/m2-conns.yaml"
 expect_ok "veth-h1 ingress redirected to eg-ifb1" bash -c "tc filter show dev veth-h1 ingress | grep -q 'Egress Redirect to device eg-ifb1'"
 expect_ok "tbf 10Mbit on eg-ifb1" bash -c "tc qdisc show dev eg-ifb1 | grep -q 'tbf.*rate 10Mbit'"
 expect_ok "tbf 20Mbit on veth-h1" bash -c "tc qdisc show dev veth-h1 | grep -q 'tbf.*rate 20Mbit'"
@@ -76,7 +76,7 @@ done
 if ((recovered > 0)); then pass "t3 recovers the full 64 connections (attempt $recovered)"; else fail "t3 never recovered 64 connections: $out"; fi
 
 log "new-connection rate limit"
-expect_ok "reload t3 to 5 new conns/s" egressd policy apply t3 "$P/m2-rate.yaml"
+expect_ok "reload t3 to 5 new conns/s" sandwall policy apply t3 "$P/m2-rate.yaml"
 out=$(sbx t3 python3 "$SBX_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 40 0.3)
 connected=$(jq .connected <<<"$out")
 if ((connected < 40)); then pass "burst of 40 new conns throttled ($connected connected within 0.3s each)"; else fail "no throttling: $out"; fi
@@ -104,28 +104,28 @@ log "metrics"
 sbx t1 curl -sS -m 3 http://169.254.169.254/ >/dev/null 2>&1
 sleep 1
 for series in \
-	'egressd_flows_total sandbox="t1".*verdict="allow"' \
-	'egressd_flows_total sandbox="t1".*verdict="deny"' \
-	'egressd_bytes_total direction="in".*sandbox="t1"' \
-	'egressd_bytes_total direction="out".*sandbox="t1"' \
-	'egressd_dns_queries_total sandbox="t1".*verdict="allow"' \
-	'egressd_denied_total reason="blocked_range".*sandbox="t1"' \
-	'egressd_denied_total reason="conn_limit".*sandbox="t3"' \
-	'egressd_denied_total reason="rate_limit".*sandbox="t3"'; do
+	'sandwall_flows_total sandbox="t1".*verdict="allow"' \
+	'sandwall_flows_total sandbox="t1".*verdict="deny"' \
+	'sandwall_bytes_total direction="in".*sandbox="t1"' \
+	'sandwall_bytes_total direction="out".*sandbox="t1"' \
+	'sandwall_dns_queries_total sandbox="t1".*verdict="allow"' \
+	'sandwall_denied_total reason="blocked_range".*sandbox="t1"' \
+	'sandwall_denied_total reason="conn_limit".*sandbox="t3"' \
+	'sandwall_denied_total reason="rate_limit".*sandbox="t3"'; do
 	read -r name labels <<<"$series"
 	v=$(metric "$name" "$labels")
 	if [[ -n "$v" && "$v" != "0" ]]; then pass "$name{$labels} = $v"; else fail "$name{$labels} missing"; fi
 done
-bytes_metric=$(metric egressd_bytes_total 'direction="in".*sandbox="t1"')
+bytes_metric=$(metric sandwall_bytes_total 'direction="in".*sandbox="t1"')
 if awk -v b="$bytes_metric" 'BEGIN {exit !(b >= 10485760)}'; then pass "bytes_total{in} counts the download"; else fail "bytes_total{in} = $bytes_metric"; fi
 
 log "limits hot reload and teardown"
-expect_ok "reload t1 to unlimited" egressd policy apply t1 "$P/m2-unlimited.yaml"
+expect_ok "reload t1 to unlimited" sandwall policy apply t1 "$P/m2-unlimited.yaml"
 expect_eq "egress redirect removed" "$(tc filter show dev veth-h1 ingress | grep -c redirect)" 0
 expect_eq "eg-ifb1 removed" "$(ip -o link show eg-ifb1 2>/dev/null | wc -l)" 0
 expect_eq "tbf removed" "$(tc qdisc show dev veth-h1 | grep -c tbf)" 0
-expect_ok "destroy t3" egressd sandbox destroy t3
+expect_ok "destroy t3" sandwall sandbox destroy t3
 expect_eq "t3 metrics forgotten" "$(curl -s http://127.0.0.1:19464/metrics | grep -c 'sandbox="t3"')" 0
 stop_daemon
-expect_ok "nuke" egressd nuke
+expect_ok "nuke" sandwall nuke
 assert_no_remnants

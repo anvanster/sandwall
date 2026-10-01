@@ -44,7 +44,7 @@ The e2e harness instead puts the listener in its own netns `egattacker`, reached
 
 ### Deny log de-duplication
 Identical deny events (same sandbox, reason, protocol, destination and port) are logged at most once per second, so retransmits or a flood of dropped packets cannot flood the log.
-`egressd_denied_total` still counts every packet.
+`sandwall_denied_total` still counts every packet.
 
 ### Exec mode
 `sandbox exec` runs `ip netns exec sb<k> setpriv --reuid=65534 --regid=65534 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs -- cmd`.
@@ -52,7 +52,7 @@ Identical deny events (same sandbox, reason, protocol, destination and port) are
 Clearing the bounding set means not even a setuid binary can regain `CAP_NET_ADMIN`.
 
 ### Daemon restart and state
-Sandbox records are persisted under `--state-dir` (default `/var/lib/egressd/sandboxes/`).
+Sandbox records are persisted under `--state-dir` (default `/var/lib/sandwall/sandboxes/`).
 A restarted daemon re-applies each sandbox idempotently and rebinds its DNS proxy, keeping the existing `allow_<k>` contents so established clients keep working.
 While the daemon is down, sandbox DNS fails closed: nothing listens on `10.200.k.1:53`.
 `nuke` works with or without a running daemon.
@@ -112,15 +112,15 @@ Otherwise it comes from the time the collector saw the flow's NEW event.
 Byte counts are layer 3, so they include IP and TCP headers.
 On the 10 MiB e2e download they come out 1.4 to 1.7% above the payload size.
 
-### `egressd_flows_total{verdict="deny"}`
+### `sandwall_flows_total{verdict="deny"}`
 Denied traffic never becomes a confirmed conntrack flow, so there is no denied "flow" to count.
 This series counts logged deny events, which are de-duplicated per second, as an approximation of denied flow attempts.
-`egressd_denied_total{reason}` counts every dropped or rejected packet.
+`sandwall_denied_total{reason}` counts every dropped or rejected packet.
 
 ## M3
 
 ### VM-mode netns plumbing
-Inside a VM-mode netns, egressd owns `table ip egressd_vm`.
+Inside a VM-mode netns, sandwall owns `table ip sandwall_vm`.
 Guest DNS to `172.16.0.1:53` is DNATed to `10.200.k.1:53`, and guest traffic leaving `veth-s<k>` is masqueraded to `10.200.k.2`.
 From then on the host enforces policy and attributes logs exactly as for exec mode.
 Two deviations from the original design:
@@ -131,7 +131,7 @@ The host reaches a guest over SSH from inside its netns (the e2e harness's contr
 Replies come back through the `established` rule.
 
 ### Jail layout and identity
-Each VM runs as `jailer --id egressd-sb<k> --netns /var/run/netns/sb<k>`, under uid/gid `base+k`, in its own chroot under `--chroot-base` (default `/srv/jailer`).
+Each VM runs as `jailer --id sandwall-sb<k> --netns /var/run/netns/sb<k>`, under uid/gid `base+k`, in its own chroot under `--chroot-base` (default `/srv/jailer`).
 
 The base was originally 100000, which is where distributions start the subordinate ranges in `/etc/subuid` and `/etc/subgid`.
 A rootless container of the first regular user would run with the same ids as a VMM and could open its jail files.
@@ -139,8 +139,8 @@ The default base is now 2000000000 (ids stay below 2^31), configurable with `dae
 A VM that was already running when the daemon is upgraded keeps its old uid until it is restarted.
 Every jail uses the same names: `vmlinux`, `drive-<id>`, `tap0`, guest MAC `06:00:AC:10:00:02` and guest IP `172.16.0.2`.
 So a snapshot from any sandbox restores unchanged in any other.
-`--vm-config` is a Firecracker config file without `network-interfaces`, which egressd owns.
-egressd rewrites paths to jail-relative names and appends `ipv6.disable=1 ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off` to the boot args.
+`--vm-config` is a Firecracker config file without `network-interfaces`, which sandwall owns.
+sandwall rewrites paths to jail-relative names and appends `ipv6.disable=1 ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off` to the boot args.
 
 ### Snapshots and clones
 `vm snapshot` pauses the VM, writes a full snapshot, copies the drives while still paused (so memory and disk agree), and resumes it.
@@ -169,7 +169,7 @@ M3 was developed in a Lima VM (vz backend) with nested virtualization on Apple s
 There, starting many KVM guests back to back (about 0.6s apart) left most of them with a vCPU spinning in the guest, unresponsive for minutes.
 The KVM counters showed constant exits but almost no WFI.
 This happened with freshly booted VMs as well as restored clones, and never with one VM, or with starts paced 1s apart (20 of 20 healthy, idle at ~0% CPU).
-egressd does not hide a delay for this.
+sandwall does not hide a delay for this.
 `vm clone --stagger <duration>` is an explicit option, also useful on bare metal to spread out the memory faulting of many clones.
 The M3 e2e test uses `--stagger 1s` (override with `CLONE_STAGGER`).
 On bare-metal KVM `--stagger 0` works: on a 96-CPU host, 20 clones started back to back, then all 20 fetched at once (`FETCH_CONCURRENCY=20`), in two separate runs.
@@ -183,16 +183,16 @@ On bare metal, set `FETCH_CONCURRENCY=20` to fetch from all clones at once.
 ## Upstream proxy
 
 Many networks allow no direct egress: only an HTTP proxy reaches the internet, while the site resolver still resolves external names.
-On such a host every allowed sandbox flow leaves the uplink and is dropped by the network, so egressd's allow verdicts have no effect.
+On such a host every allowed sandbox flow leaves the uplink and is dropped by the network, so sandwall's allow verdicts have no effect.
 Seen on an M3 bare-metal host: the two guest checks that fetch real internet sites got no connection, while all 57 others passed.
 
 ### The proxy is a next hop, not a destination
-The sandbox keeps connecting to the real destination, for example `151.101.0.223:443` learned from an allowlisted DNS answer, and egressd keeps enforcing policy on that destination.
-Only after a flow is allowed does egressd carry it onward, as a `CONNECT` through the upstream proxy instead of a masqueraded packet.
+The sandbox keeps connecting to the real destination, for example `151.101.0.223:443` learned from an allowlisted DNS answer, and sandwall keeps enforcing policy on that destination.
+Only after a flow is allowed does sandwall carry it onward, as a `CONNECT` through the upstream proxy instead of a masqueraded packet.
 The sandbox needs no proxy settings and cannot see or reach the proxy.
 
 Setting `https_proxy` inside the sandbox was rejected.
-egressd would then only see connections to the proxy, so allowing the proxy would allow everything the proxy can reach, and domain allowlists would stop meaning anything.
+sandwall would then only see connections to the proxy, so allowing the proxy would allow everything the proxy can reach, and domain allowlists would stop meaning anything.
 It would also need the sandbox's cooperation.
 
 ### Packet flow (TCP)
@@ -207,7 +207,7 @@ veth-h<k> ─► prerouting filter (priority -150): iifname vmap → jump sb_<k>
                ▼
              input: sbin_<k> accepts tcp dport 15001 only with ct status dnat
                ▼
-             relay_<k> in egressd, one listener per sandbox
+             relay_<k> in sandwall, one listener per sandbox
                1. original destination from SO_ORIGINAL_DST
                2. name from the TLS SNI or HTTP Host (peeked), else the DNS cache, else the IP
                3. the name must match the allowlist and map to that IP, else deny sni_mismatch
@@ -246,7 +246,7 @@ This also closes a gap that direct mode has today: an IP learned for one allowli
 The same relay enforces the SNI check (S1) in direct mode; see below.
 
 ### The proxy stays out of the sandbox's reach
-The proxy's address stays subject to `blocked_range` for sandbox traffic; only the egressd process talks to it.
+The proxy's address stays subject to `blocked_range` for sandbox traffic; only the sandwall process talks to it.
 Proxy credentials (`Proxy-Authorization`) stay on the host.
 
 ### Plain HTTP, other ports, UDP
@@ -282,19 +282,19 @@ The proxy is a property of the host network, so it is configured on the daemon, 
 Only `http://` proxies are supported. The mode applies to every sandbox of the daemon; restarting the daemon with or without it re-renders every sandbox accordingly.
 
 ### Relayed connections end with the daemon
-Forwarded flows live in the kernel and survive a daemon restart; relayed connections are terminated in the egressd process and do not.
+Forwarded flows live in the kernel and survive a daemon restart; relayed connections are terminated in the sandwall process and do not.
 New connections work again as soon as the restarted daemon has rebound its relays.
 
 ### Limits and observability
 - tc shaping on the veth, `ct count` and the new-connection rate all act on the sandbox leg, unchanged.
 - The relay also caps concurrent proxied connections at `max_conns`.
 - A new `proxy` log event records `src_port`, `dst_ip`, `dst_port`, `name`, `sni`, `status` and `connect_ms`; `flow` events are unchanged.
-- New metric `egressd_proxy_connects_total{result}`.
+- New metric `sandwall_proxy_connects_total{result}`.
 - VM mode needs no changes: guest traffic is already masqueraded to `10.200.k.2` inside its netns.
 
 ### Testing
 `test/e2e/proxy.sh` runs a fake upstream proxy (`proxy.py`) in the `egattacker` netns that logs every request line.
-It checks that allowlisted HTTP arrives in absolute form and TLS as `CONNECT <name>:<port>`, both with egressd's credentials and never the sandbox's; that a non-allowlisted SNI or Host to an allowed address is refused and never reaches the proxy; that a sandbox using the proxy address as its own proxy only reaches the relay; that a proxy refusal is logged with its status; that the relay port, UDP, blocked and non-allowlisted destinations behave as designed; that a reload applies to new connections; and that the relay comes back after a daemon restart.
+It checks that allowlisted HTTP arrives in absolute form and TLS as `CONNECT <name>:<port>`, both with sandwall's credentials and never the sandbox's; that a non-allowlisted SNI or Host to an allowed address is refused and never reaches the proxy; that a sandbox using the proxy address as its own proxy only reaches the relay; that a proxy refusal is logged with its status; that the relay port, UDP, blocked and non-allowlisted destinations behave as designed; that a reload applies to new connections; and that the relay comes back after a daemon restart.
 With `REAL_PROXY` set it also fetches `https://pypi.org` through a real site proxy, on a host with no direct egress.
 Two more daemon runs check `no_proxy` by address and by name: the fetch reaches the origin without the proxy or the relay seeing it, allowed UDP is not rejected, and the direct set survives a restart with the same `no_proxy` but is reset when it changes.
 In the test the proxy shares the attacker address, which the test exempts from the blocked ranges; a real proxy on a private address stays blocked for sandboxes.
@@ -308,7 +308,7 @@ Without a proxy, the relay connects to the original destination itself instead o
 It uses REDIRECT rather than TPROXY, for the reasons given under "REDIRECT, not TPROXY" above.
 
 `sbnat_<k>` redirects allowed TCP to ports 80 and 443 to the relay; `relay_redirect` (renamed from `proxy_redirect`, which the base ruleset deletes) dispatches to it whenever the relay is on.
-The `proxy` log event and `egressd_proxy_connects_total` became `relay` and `egressd_relay_connections_total`, since they now describe both modes.
+The `proxy` log event and `sandwall_proxy_connects_total` became `relay` and `sandwall_relay_connections_total`, since they now describe both modes.
 
 ### On by default
 `daemon --sni-check` defaults to on, because the shared-CDN gap it closes is the most practical way around a domain allowlist.
@@ -368,3 +368,11 @@ The quarantine (time, reason, frozen) is stored in the sandbox record, so a rest
 ### Testing
 `test/e2e/quarantine.sh` cuts a forwarded and a relayed download in flight (the sandbox has a 2 Mbit ingress cap, so data is still on the wire when the cut happens; with only a client-side `--limit-rate`, a local endpoint fills the client's socket buffer within the first two seconds), and checks the logged flow bytes, refused and unforwarded DNS, dropped TCP and UDP, quarantine across `policy apply` and a daemon restart, freezing, release, and destroy while frozen.
 M3 checks that a quarantined guest is cut off and that `--freeze` pauses and `release` resumes the VM.
+
+## Name
+
+The project was developed as `egressd` and renamed to `sandwall` before its first release.
+An earlier, unrelated project, castai/egressd (Kubernetes-aware network traffic monitoring, archived in 2026), works in the same space of Linux egress traffic, conntrack and Prometheus metrics under that name.
+Everything was renamed at once without compatibility shims: binary, Go module, nftables tables (`inet sandwall`, `ip sandwall_vm`), log prefixes, metrics (`sandwall_*`), jail ids, and the default state, log, socket and asset paths.
+A host that ran the old binary needs one `egressd nuke` before switching, since `sandwall nuke` does not know the old names.
+

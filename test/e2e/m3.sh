@@ -12,20 +12,20 @@ CLONES=${CLONES:-20}
 [[ -f "$FC_ASSETS/fc.json" ]] || { echo "run test/e2e/fc-assets.sh first"; exit 1; }
 
 log "setup"
-egressd nuke >/dev/null
+sandwall nuke >/dev/null
 setup_attacker || exit 1
 start_iperf 5201
 # VMMs must not share ids with rootless containers (subordinate ranges).
 if sub=$(awk -F: 'NF == 3 {print $2; exit}' /etc/subuid 2>/dev/null) && [[ -n "$sub" ]]; then
-	out=$(timeout 5 "$EGRESSD" "${G[@]}" daemon "${FC_FLAGS[@]}" --vm-uid-base "$((sub - 1))" 2>&1)
+	out=$(timeout 5 "$SANDWALL" "${G[@]}" daemon "${FC_FLAGS[@]}" --vm-uid-base "$((sub - 1))" 2>&1)
 	expect_ok "daemon refuses VMM ids overlapping /etc/subuid" grep -q "overlaps the VMM ids" <<<"$out"
 fi
 start_daemon "${FC_FLAGS[@]}" || exit 1
-expect_fail "vm mode needs --vm-config" egressd sandbox create nocfg --mode vm --policy "$P/m1.yaml"
-expect_ok "create VM sandbox v1" egressd sandbox create v1 --mode vm --vm-config "$FC_ASSETS/fc.json" --policy "$P/m1.yaml"
+expect_fail "vm mode needs --vm-config" sandwall sandbox create nocfg --mode vm --policy "$P/m1.yaml"
+expect_ok "create VM sandbox v1" sandwall sandbox create v1 --mode vm --vm-config "$FC_ASSETS/fc.json" --policy "$P/m1.yaml"
 expect_ok "guest reachable" wait_guest v1
 ns=$(sb_field v1 .netns)
-fc_pid=$(pgrep -f 'firecracker --id egressd-sb1')
+fc_pid=$(pgrep -f 'firecracker --id sandwall-sb1')
 expect_eq "firecracker runs inside the sandbox netns (jailer --netns)" "$(ip netns identify "$fc_pid")" "$ns"
 expect_eq "firecracker runs unprivileged" "$(ps -o uid= -p "$fc_pid" | tr -d ' ')" 2000000001
 expect_eq "guest IP from kernel cmdline" "$(vmx v1 ip -4 -o addr show eth0 | awk '{print $4}')" 172.16.0.2/30
@@ -60,11 +60,11 @@ kill "$TCPDUMP"; wait "$TCPDUMP" 2>/dev/null
 expect_ok "capture saw the allowlisted canary query" grep -q "$canary" "$T/uplink-dns.txt"
 expect_fail "capture never saw the tunnel query" grep -q "$secret" "$T/uplink-dns.txt"
 
-expect_ok "hot reload: allow example.com" egressd policy apply v1 "$P/m1-reload.yaml"
+expect_ok "hot reload: allow example.com" sandwall policy apply v1 "$P/m1-reload.yaml"
 expect_eq "guest curl https://example.com now succeeds" "$(vmx v1 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://example.com/)" 200
 
 log "Firecracker rate limiters from policy"
-expect_ok "apply 10mbit/20mbit policy" egressd policy apply v1 "$P/m3-shaped.yaml"
+expect_ok "apply 10mbit/20mbit policy" sandwall policy apply v1 "$P/m3-shaped.yaml"
 expect_eq "tx limiter 10mbit" "$(fc_api v1 /vm/config | jq '.["network-interfaces"][0].tx_rate_limiter.bandwidth.size')" 1250000
 expect_eq "rx limiter 20mbit" "$(fc_api v1 /vm/config | jq '.["network-interfaces"][0].rx_rate_limiter.bandwidth.size')" 2500000
 vmx v1 iperf3 -c "$A" -p 5201 -t 6 -O 2 -J >"$T/v1-up.json" 2>&1
@@ -74,26 +74,26 @@ wait_log v1 "guest flow logged" ".type==\"flow\" and .dst_ip==\"$A\" and .dst_po
 
 log "quarantine a VM"
 expect_eq "guest reaches the allowed attacker" "$(vmx v1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://$A:$ATTACKER_PORT/")" 200
-expect_ok "quarantine v1" egressd sandbox quarantine v1 --reason "e2e"
+expect_ok "quarantine v1" sandwall sandbox quarantine v1 --reason "e2e"
 expect_fail "guest cut off" vmx v1 curl -sS -m 3 "http://$A:$ATTACKER_PORT/"
 wait_log v1 "guest traffic dropped as quarantined" ".type==\"deny\" and .dst_ip==\"$A\" and .reason==\"quarantined\""
 expect_eq "guest DNS refused" "$(vm_dns_status v1 pypi.org)" REFUSED
-expect_ok "quarantine --freeze pauses the VM" egressd sandbox quarantine v1 --freeze
+expect_ok "quarantine --freeze pauses the VM" sandwall sandbox quarantine v1 --freeze
 expect_eq "VM paused" "$(fc_api v1 / | jq -r .state)" Paused
-expect_ok "release v1" egressd sandbox release v1
+expect_ok "release v1" sandwall sandbox release v1
 expect_eq "VM resumed" "$(fc_api v1 / | jq -r .state)" Running
 expect_eq "guest reaches the attacker again" "$(vmx v1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://$A:$ATTACKER_PORT/")" 200
 
 log "snapshot and $CLONES clones"
 SNAP="$T/snap"
-expect_ok "snapshot v1" egressd vm snapshot v1 --out "$SNAP"
+expect_ok "snapshot v1" sandwall vm snapshot v1 --out "$SNAP"
 expect_ok "v1 keeps running after snapshot" vmx v1 true
 # On nested-virtualization hosts (e.g. a Lima VM on Apple silicon), starting
 # many KVM guests back to back leaves some vCPUs spinning; see DECISIONS.md.
-expect_ok "clone x$CLONES" egressd vm clone "$SNAP" --count "$CLONES" --prefix c --stagger "${CLONE_STAGGER:-1s}" --policy "$P/m3-clone.yaml"
-expect_eq "$CLONES clones listed" "$(egressd sandbox list --json | jq '[.[] | select(.id|startswith("c-"))] | length')" "$CLONES"
-expect_eq "every clone's VM running" "$(egressd sandbox list --json | jq '[.[] | select(.id|startswith("c-")) | select(.vm.running)] | length')" "$CLONES"
-expect_eq "every clone in its own netns" "$(egressd sandbox list --json | jq '[.[] | select(.id|startswith("c-")) | .netns] | unique | length')" "$CLONES"
+expect_ok "clone x$CLONES" sandwall vm clone "$SNAP" --count "$CLONES" --prefix c --stagger "${CLONE_STAGGER:-1s}" --policy "$P/m3-clone.yaml"
+expect_eq "$CLONES clones listed" "$(sandwall sandbox list --json | jq '[.[] | select(.id|startswith("c-"))] | length')" "$CLONES"
+expect_eq "every clone's VM running" "$(sandwall sandbox list --json | jq '[.[] | select(.id|startswith("c-")) | select(.vm.running)] | length')" "$CLONES"
+expect_eq "every clone in its own netns" "$(sandwall sandbox list --json | jq '[.[] | select(.id|startswith("c-")) | .netns] | unique | length')" "$CLONES"
 
 for i in $(seq "$CLONES"); do wait_guest "c-$i" || break; done
 same=0
@@ -144,19 +144,19 @@ done
 expect_eq "fetches overlapped within every wave (host conntrack times)" "$overlapping_waves" "$waves"
 expect_eq "each clone's DNS and flow logged only in its own log" "$attributed" "$CLONES"
 
-expect_ok "clone c-1 gets its own stricter policy" egressd policy apply c-1 "$P/m1.yaml"
+expect_ok "clone c-1 gets its own stricter policy" sandwall policy apply c-1 "$P/m1.yaml"
 expect_eq "c-1 now refuses attacker.test" "$(vm_dns_status c-1 c1.attacker.test)" REFUSED
 expect_eq "c-2 still resolves it" "$(vm_dns_status c-2 c2.attacker.test)" NOERROR
 
 log "daemon restart adopts running VMs"
 stop_daemon
 start_daemon "${FC_FLAGS[@]}" || exit 1
-expect_eq "VMs still running after restart" "$(egressd sandbox list --json | jq '[.[] | select(.vm.running)] | length')" $((CLONES + 1))
+expect_eq "VMs still running after restart" "$(sandwall sandbox list --json | jq '[.[] | select(.vm.running)] | length')" $((CLONES + 1))
 expect_eq "clone DNS works after restart" "$(vm_dns_status c-2 c2.attacker.test)" NOERROR
 
 log "destroy and nuke"
-expect_ok "destroy c-1" egressd sandbox destroy c-1
+expect_ok "destroy c-1" sandwall sandbox destroy c-1
 expect_eq "c-1 VMM gone" "$(sb_field c-1 .id)" ""
-expect_ok "nuke" egressd nuke
+expect_ok "nuke" sandwall nuke
 stop_daemon
 assert_no_remnants

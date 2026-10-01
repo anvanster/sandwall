@@ -1,13 +1,13 @@
-add table ip egressd_vm
-delete table ip egressd_vm
-add table ip egressd_vm
-add chain ip egressd_vm prerouting { type nat hook prerouting priority dstnat; policy accept; }
-add rule ip egressd_vm prerouting iifname "tap0" ip daddr 172.16.0.1 meta l4proto { tcp, udp } th dport 53 dnat to 10.200.7.1:53
-add chain ip egressd_vm postrouting { type nat hook postrouting priority srcnat; policy accept; }
-add rule ip egressd_vm postrouting ip saddr 172.16.0.2 oifname "veth-s7" masquerade
-add chain ip egressd_vm forward { type filter hook forward priority filter; policy drop; }
-add rule ip egressd_vm forward iifname "tap0" oifname "veth-s7" ip saddr 172.16.0.2 accept
-add rule ip egressd_vm forward iifname "veth-s7" oifname "tap0" ct state established,related accept
-add chain ip egressd_vm input { type filter hook input priority filter; policy accept; }
-add rule ip egressd_vm input iifname "tap0" ct state established,related accept
-add rule ip egressd_vm input iifname "tap0" drop
+add table ip sandwall_vm
+delete table ip sandwall_vm
+add table ip sandwall_vm
+add chain ip sandwall_vm prerouting { type nat hook prerouting priority dstnat; policy accept; }
+add rule ip sandwall_vm prerouting iifname "tap0" ip daddr 172.16.0.1 meta l4proto { tcp, udp } th dport 53 dnat to 10.200.7.1:53
+add chain ip sandwall_vm postrouting { type nat hook postrouting priority srcnat; policy accept; }
+add rule ip sandwall_vm postrouting ip saddr 172.16.0.2 oifname "veth-s7" masquerade
+add chain ip sandwall_vm forward { type filter hook forward priority filter; policy drop; }
+add rule ip sandwall_vm forward iifname "tap0" oifname "veth-s7" ip saddr 172.16.0.2 accept
+add rule ip sandwall_vm forward iifname "veth-s7" oifname "tap0" ct state established,related accept
+add chain ip sandwall_vm input { type filter hook input priority filter; policy accept; }
+add rule ip sandwall_vm input iifname "tap0" ct state established,related accept
+add rule ip sandwall_vm input iifname "tap0" drop

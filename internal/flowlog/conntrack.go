@@ -13,7 +13,7 @@ import (
 	"github.com/ti-mo/conntrack"
 	"github.com/ti-mo/netfilter"
 
-	"github.com/anvanster/egressd/internal/addressing"
+	"github.com/anvanster/sandwall/internal/addressing"
 )
 
 const (

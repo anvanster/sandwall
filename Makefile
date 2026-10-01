@@ -1,18 +1,18 @@
 GO      ?= go
-BIN     := bin/egressd
+BIN     := bin/sandwall
 GOFLAGS ?=
 # Optional e2e locations; empty means the scripts' defaults.
 FC_ASSETS   ?=
 CHROOT_BASE ?=
 E2E_TMP     ?=
-E2E_ENV = EGRESSD=$(CURDIR)/$(BIN) $(if $(FC_ASSETS),FC_ASSETS=$(FC_ASSETS)) \
+E2E_ENV = SANDWALL=$(CURDIR)/$(BIN) $(if $(FC_ASSETS),FC_ASSETS=$(FC_ASSETS)) \
 	$(if $(CHROOT_BASE),CHROOT_BASE=$(CHROOT_BASE)) $(if $(E2E_TMP),E2E_TMP=$(E2E_TMP)) \
 	$(foreach v,CLONES CLONE_STAGGER FETCH_CONCURRENCY REAL_PROXY,$(if $($(v)),$(v)=$($(v))))
 
 .PHONY: build test vet fmt-check e2e e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-quarantine fc-assets clean
 
 build:
-	CGO_ENABLED=0 GOOS=linux $(GO) build $(GOFLAGS) -o $(BIN) ./cmd/egressd
+	CGO_ENABLED=0 GOOS=linux $(GO) build $(GOFLAGS) -o $(BIN) ./cmd/sandwall
 
 # Unit tests: policy parsing, allowlist matching, DNS proxy logic, golden rulesets.
 test:

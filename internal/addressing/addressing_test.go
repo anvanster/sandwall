@@ -19,7 +19,7 @@ func TestFor(t *testing.T) {
 }
 
 // Nuke deletes whatever these parsers accept, so they must reject anything
-// egressd did not create.
+// sandwall did not create.
 func TestIndexParsers(t *testing.T) {
 	cases := []struct {
 		name string

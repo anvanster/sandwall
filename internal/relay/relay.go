@@ -28,9 +28,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anvanster/egressd/internal/dnsproxy"
-	"github.com/anvanster/egressd/internal/flowlog"
-	"github.com/anvanster/egressd/internal/nft"
+	"github.com/anvanster/sandwall/internal/dnsproxy"
+	"github.com/anvanster/sandwall/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/nft"
 )
 
 // Deny reasons the relay logs, in addition to nft.ReasonConnLimit.
@@ -545,7 +545,7 @@ func hostOnly(hostport string) string {
 }
 
 func writeStatus(w io.Writer, code int) {
-	body := "egressd: " + http.StatusText(code) + "\n"
+	body := "sandwall: " + http.StatusText(code) + "\n"
 	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		code, http.StatusText(code), len(body), body)
 }

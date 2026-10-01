@@ -11,7 +11,7 @@ import (
 
 	"github.com/florianl/go-nflog/v2"
 
-	"github.com/anvanster/egressd/internal/nft"
+	"github.com/anvanster/sandwall/internal/nft"
 )
 
 // dedupeWindow suppresses repeated identical deny lines (for example TCP SYN
@@ -26,7 +26,7 @@ type Resolver func(k int) (sandboxID string, ok bool)
 // packets whose log line was suppressed as a duplicate.
 type DenyCounter func(sandboxID, reason string, logged bool)
 
-// DenyCollector turns NFLOG messages from egressd's deny rules into events.
+// DenyCollector turns NFLOG messages from sandwall's deny rules into events.
 type DenyCollector struct {
 	sink    *Sink
 	resolve Resolver

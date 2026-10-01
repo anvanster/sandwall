@@ -1,4 +1,4 @@
-module github.com/anvanster/egressd
+module github.com/anvanster/sandwall
 
 go 1.26.0
 

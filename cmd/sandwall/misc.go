@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anvanster/egressd/internal/api"
-	"github.com/anvanster/egressd/internal/daemon"
-	"github.com/anvanster/egressd/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/api"
+	"github.com/anvanster/sandwall/internal/daemon"
+	"github.com/anvanster/sandwall/internal/flowlog"
 )
 
 func newPolicyCmd(g *globalFlags) *cobra.Command {
@@ -57,7 +57,7 @@ func newLogsCmd(g *globalFlags) *cobra.Command {
 func newNukeCmd(g *globalFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "nuke",
-		Short: "Remove ALL egressd netns, veths, nft table and tc state, and restore sysctls. Idempotent.",
+		Short: "Remove ALL sandwall netns, veths, nft table and tc state, and restore sysctls. Idempotent.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireRoot(); err != nil {
@@ -66,7 +66,7 @@ func newNukeCmd(g *globalFlags) *cobra.Command {
 			// Let a running daemon drop its in-memory state and listeners first.
 			err := api.NewClient(g.socket).Do(cmd.Context(), http.MethodPost, "/v1/nuke", nil, nil)
 			if err != nil && !errors.Is(err, api.ErrDaemonUnavailable) {
-				fmt.Fprintln(os.Stderr, "egressd: daemon nuke failed, cleaning up directly:", err)
+				fmt.Fprintln(os.Stderr, "sandwall: daemon nuke failed, cleaning up directly:", err)
 			}
 			// Always sweep directly too, so nuke works with a dead daemon.
 			if err := daemon.Cleanup(cmd.Context(), g.stateDir, g.chrootBase); err != nil {

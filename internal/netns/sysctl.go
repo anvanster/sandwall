@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 )
 
-// HostSysctls are the host-wide settings egressd needs. Their original
+// HostSysctls are the host-wide settings sandwall needs. Their original
 // values are recorded before the first change and restored by nuke.
 var HostSysctls = map[string]string{
 	"net/ipv4/ip_forward":                  "1",

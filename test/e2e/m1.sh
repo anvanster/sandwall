@@ -8,14 +8,14 @@ orig_fwd=$(sysctl -n net.ipv4.ip_forward)
 orig_acct=$(sysctl -n net.netfilter.nf_conntrack_acct)
 
 log "setup"
-egressd nuke >/dev/null
+sandwall nuke >/dev/null
 setup_attacker || exit 1
 expect_ok "attacker endpoint reachable from host" curl -sf -m 3 "http://$ATTACKER_IP:$ATTACKER_PORT/"
 start_daemon || exit 1
-expect_ok "create sandbox t1" egressd sandbox create t1 --policy "$P/m1.yaml"
-expect_ok "create sandbox t2" egressd sandbox create t2 --policy "$P/m1.yaml"
-expect_fail "duplicate id rejected" egressd sandbox create t1 --policy "$P/m1.yaml"
-expect_fail "invalid policy rejected" egressd sandbox create bad --policy "$P/invalid.yaml"
+expect_ok "create sandbox t1" sandwall sandbox create t1 --policy "$P/m1.yaml"
+expect_ok "create sandbox t2" sandwall sandbox create t2 --policy "$P/m1.yaml"
+expect_fail "duplicate id rejected" sandwall sandbox create t1 --policy "$P/m1.yaml"
+expect_fail "invalid policy rejected" sandwall sandbox create bad --policy "$P/invalid.yaml"
 expect_eq "invalid create left nothing behind" "$(ip netns list | grep -cE '^sb[0-9]+')" 2
 
 log "sandbox isolation"
@@ -42,7 +42,7 @@ expect_fail "host LAN IP $HOST_IP blocked" sbx t1 curl -sS -m 3 "http://$HOST_IP
 wait_log t1 "host access deny logged" ".type==\"deny\" and .dst_ip==\"$HOST_IP\" and .reason==\"host_access\""
 # A gateway on a private address is a blocked range; one on a public
 # address is just another destination outside the allowlist.
-if nft get element inet egressd blocked_ranges "{ $GATEWAY_IP }" >/dev/null 2>&1; then gw_reason=blocked_range; else gw_reason=not_allowed; fi
+if nft get element inet sandwall blocked_ranges "{ $GATEWAY_IP }" >/dev/null 2>&1; then gw_reason=blocked_range; else gw_reason=not_allowed; fi
 expect_fail "LAN gateway $GATEWAY_IP blocked" sbx t1 curl -sS -m 3 "http://$GATEWAY_IP/"
 wait_log t1 "LAN gateway deny logged ($gw_reason)" ".type==\"deny\" and .dst_ip==\"$GATEWAY_IP\" and .reason==\"$gw_reason\""
 expect_fail "other sandbox 10.200.2.2 blocked" sbx t1 curl -sS -m 3 http://10.200.2.2/
@@ -85,7 +85,7 @@ log "hot reload"
 sbx t1 curl -sS -m 8 --limit-rate 200k -o /dev/null -w '%{size_download}' https://pypi.org/simple/ >"$T/inflight.txt" 2>"$T/inflight.err" &
 INFLIGHT=$!
 sleep 3
-expect_ok "apply policy without pypi.org" egressd policy apply t1 "$P/m1-reload.yaml"
+expect_ok "apply policy without pypi.org" sandwall policy apply t1 "$P/m1-reload.yaml"
 expect_eq "new pypi.org lookups now refused" "$(dns_status t1 pypi.org)" REFUSED
 wait "$INFLIGHT"
 inflight_rc=$?
@@ -93,27 +93,27 @@ expect_eq "in-flight download ran to its own timeout (curl exit 28)" "$inflight_
 inflight_bytes=$(<"$T/inflight.txt")
 if ((${inflight_bytes:-0} > 1000000)); then pass "in-flight download kept receiving after reload ($inflight_bytes bytes)"; else fail "in-flight download stalled at ${inflight_bytes:-0} bytes"; fi
 expect_eq "curl https://example.com now succeeds" "$(sbx t1 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://example.com/)" 200
-expect_eq "other sandbox unaffected by reload" "$(egressd sandbox list --json | jq -r '.[] | select(.id=="t2") | .policy.egress.allow_domains | index("example.com")')" null
+expect_eq "other sandbox unaffected by reload" "$(sandwall sandbox list --json | jq -r '.[] | select(.id=="t2") | .policy.egress.allow_domains | index("example.com")')" null
 
 log "daemon restart restores sandboxes"
 stop_daemon
 expect_eq "DNS fails closed while daemon is down" "$(ip netns exec sb1 dig +tries=1 +time=2 pypi.org | awk '/status:/ {print $6}')" ""
 start_daemon || exit 1
-expect_eq "sandboxes restored" "$(egressd sandbox list --json | jq -r '[.[].id] | join(",")')" "t1,t2"
+expect_eq "sandboxes restored" "$(sandwall sandbox list --json | jq -r '[.[].id] | join(",")')" "t1,t2"
 expect_eq "restored sandbox keeps reloaded policy" "$(sbx t1 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://example.com/)" 200
 
 log "destroy and nuke"
-expect_ok "destroy t2" egressd sandbox destroy t2
+expect_ok "destroy t2" sandwall sandbox destroy t2
 expect_eq "t2 netns gone" "$(ip netns list | grep -c '^sb2')" 0
 expect_ok "t2 log kept after destroy" test -s "$LOGS/t2.jsonl"
-expect_ok "nuke with daemon running" egressd nuke
+expect_ok "nuke with daemon running" sandwall nuke
 assert_no_remnants
 expect_eq "ip_forward restored" "$(sysctl -n net.ipv4.ip_forward)" "$orig_fwd"
 expect_eq "nf_conntrack_acct restored" "$(sysctl -n net.netfilter.nf_conntrack_acct)" "$orig_acct"
-expect_eq "daemon forgot sandboxes" "$(egressd sandbox list --json | jq length)" 0
-expect_ok "daemon recovers after nuke" egressd sandbox create t3 --policy "$P/m1.yaml"
+expect_eq "daemon forgot sandboxes" "$(sandwall sandbox list --json | jq length)" 0
+expect_ok "daemon recovers after nuke" sandwall sandbox create t3 --policy "$P/m1.yaml"
 expect_eq "new sandbox works after nuke" "$(sbx t3 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/)" 200
 stop_daemon
-expect_ok "nuke with daemon stopped" egressd nuke
-expect_ok "nuke is idempotent" egressd nuke
+expect_ok "nuke with daemon stopped" sandwall nuke
+expect_ok "nuke is idempotent" sandwall nuke
 assert_no_remnants

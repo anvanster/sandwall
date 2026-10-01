@@ -1,4 +1,4 @@
-// Package api is the JSON-over-HTTP transport between the egressd CLI and
+// Package api is the JSON-over-HTTP transport between the sandwall CLI and
 // daemon on a unix socket. It holds no logic of its own.
 package api
 
@@ -16,7 +16,7 @@ import (
 )
 
 // DefaultSocket is where the daemon listens.
-const DefaultSocket = "/run/egressd.sock"
+const DefaultSocket = "/run/sandwall.sock"
 
 // CreateRequest is the body of POST /v1/sandboxes.
 type CreateRequest struct {
@@ -66,7 +66,7 @@ type ErrorResponse struct {
 }
 
 // ErrDaemonUnavailable means nothing is listening on the socket.
-var ErrDaemonUnavailable = errors.New("egressd daemon is not running")
+var ErrDaemonUnavailable = errors.New("sandwall daemon is not running")
 
 // Client talks to the daemon.
 type Client struct {
@@ -96,7 +96,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://egressd"+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, "http://sandwall"+path, body)
 	if err != nil {
 		return err
 	}

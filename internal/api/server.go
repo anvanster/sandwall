@@ -11,7 +11,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/anvanster/egressd/internal/daemon"
+	"github.com/anvanster/sandwall/internal/daemon"
 )
 
 const maxBody = 1 << 20

@@ -65,13 +65,13 @@ func TestJailConfig(t *testing.T) {
 
 func TestParseVMConfigRejects(t *testing.T) {
 	cases := map[string]string{
-		"network owned by egressd": `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"r","path_on_host":"r","is_root_device":true}],"network-interfaces":[]}`,
-		"no kernel":                `{"drives":[{"drive_id":"r","path_on_host":"r","is_root_device":true}]}`,
-		"no root drive":            `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"r","path_on_host":"r"}]}`,
-		"two root drives":          `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"a","path_on_host":"a","is_root_device":true},{"drive_id":"b","path_on_host":"b","is_root_device":true}]}`,
-		"path in drive id":         `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"../x","path_on_host":"r","is_root_device":true}]}`,
-		"initrd":                   `{"boot-source":{"kernel_image_path":"k","initrd_path":"i"},"drives":[{"drive_id":"r","path_on_host":"r","is_root_device":true}]}`,
-		"not json":                 `{`,
+		"network owned by sandwall": `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"r","path_on_host":"r","is_root_device":true}],"network-interfaces":[]}`,
+		"no kernel":                 `{"drives":[{"drive_id":"r","path_on_host":"r","is_root_device":true}]}`,
+		"no root drive":             `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"r","path_on_host":"r"}]}`,
+		"two root drives":           `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"a","path_on_host":"a","is_root_device":true},{"drive_id":"b","path_on_host":"b","is_root_device":true}]}`,
+		"path in drive id":          `{"boot-source":{"kernel_image_path":"k"},"drives":[{"drive_id":"../x","path_on_host":"r","is_root_device":true}]}`,
+		"initrd":                    `{"boot-source":{"kernel_image_path":"k","initrd_path":"i"},"drives":[{"drive_id":"r","path_on_host":"r","is_root_device":true}]}`,
+		"not json":                  `{`,
 	}
 	for name, doc := range cases {
 		if _, err := ParseVMConfig([]byte(doc)); err == nil {

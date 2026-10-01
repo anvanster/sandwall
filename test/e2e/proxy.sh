@@ -10,23 +10,23 @@ P="$E2E_DIR/policies"
 A="$ATTACKER_IP"
 PROXY_PORT=3128
 PLOG="$T/proxy.log"
-PROXY_FLAGS=(--upstream-proxy "http://egressd:secret@$A:$PROXY_PORT")
+PROXY_FLAGS=(--upstream-proxy "http://sandwall:secret@$A:$PROXY_PORT")
 
 log "setup"
-egressd nuke >/dev/null
+sandwall nuke >/dev/null
 setup_attacker || exit 1
 : >"$PLOG"
 ip netns exec "$ATTACKER_NS" python3 "$E2E_DIR/proxy.py" --bind "$A" --port "$PROXY_PORT" --origin "$A" \
 	--log "$PLOG" >"$T/proxy-stderr.log" 2>&1 &
 for _ in $(seq 50); do (exec 3<>"/dev/tcp/$A/$PROXY_PORT") 2>/dev/null && break; sleep 0.1; done
 start_daemon "${PROXY_FLAGS[@]}" || exit 1
-expect_ok "create sandbox t1" egressd sandbox create t1 --policy "$P/proxy.yaml"
+expect_ok "create sandbox t1" sandwall sandbox create t1 --policy "$P/proxy.yaml"
 relay_addr=$(sb_field t1 .host_addr)
 
 log "plain HTTP through the proxy"
 expect_eq "curl http://a.attacker.test succeeds" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://a.attacker.test:$ATTACKER_PORT/")" 200
-expect_ok "proxy got an absolute-form request with egressd's credentials" \
+expect_ok "proxy got an absolute-form request with sandwall's credentials" \
 	grep -q "^GET http://a.attacker.test:$ATTACKER_PORT/ HTTP/1.1 auth=yes" "$PLOG"
 wait_log t1 "proxy event logged" \
 	".type==\"relay\" and .verdict==\"allow\" and .http_host==\"a.attacker.test:$ATTACKER_PORT\" and .proxy_status==200"
@@ -65,7 +65,7 @@ expect_eq "DNS still refused for other names" "$(dns_status t1 example.com)" REF
 
 log "policy reload"
 expect_eq "b.attacker.test resolves before the reload" "$(dns_status t1 b.attacker.test)" NOERROR
-expect_ok "reload: allow only b.attacker.test" egressd policy apply t1 "$P/proxy-reload.yaml"
+expect_ok "reload: allow only b.attacker.test" sandwall policy apply t1 "$P/proxy-reload.yaml"
 expect_fail "a.attacker.test now refused by the relay" \
 	sbx t1 curl -sk -m 5 --resolve "a.attacker.test:$ATTACKER_HOLD_PORT:$A" "https://a.attacker.test:$ATTACKER_HOLD_PORT/"
 wait_log t1 "sni_mismatch after reload" '.type=="relay" and .reason=="sni_mismatch" and .sni=="a.attacker.test"'
@@ -73,7 +73,7 @@ expect_eq "b.attacker.test still works" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
 
 log "metrics and restart"
-expect_ok "relay connections counted" bash -c "curl -s http://127.0.0.1:19464/metrics | grep -q 'egressd_relay_connections_total{result=\"ok\",sandbox=\"t1\"}'"
+expect_ok "relay connections counted" bash -c "curl -s http://127.0.0.1:19464/metrics | grep -q 'sandwall_relay_connections_total{result=\"ok\",sandbox=\"t1\"}'"
 stop_daemon
 start_daemon "${PROXY_FLAGS[@]}" || exit 1
 expect_eq "relay serves again after a daemon restart" \
@@ -82,7 +82,7 @@ expect_eq "relay serves again after a daemon restart" \
 # count_events <sandbox> <jq boolean expr>: matching lines in the sandbox log.
 count_events() { jq -c "select($2)" "$LOGS/$1.jsonl" | wc -l; }
 k=$(sb_field t1 .index)
-direct_set() { nft -j list set inet egressd "direct_$k" | jq -r '[.nftables[].set.elem // empty | .[] | (.elem.val // .)] | join(" ")'; }
+direct_set() { nft -j list set inet sandwall "direct_$k" | jq -r '[.nftables[].set.elem // empty | .[] | (.elem.val // .)] | join(" ")'; }
 
 # direct_ok <desc>: b.attacker.test fetched without the proxy or the relay
 # seeing it, and allowed UDP delivered.
@@ -100,13 +100,13 @@ direct_ok() {
 log "no_proxy by address"
 stop_daemon
 start_daemon "${PROXY_FLAGS[@]}" --no-proxy "$A" || exit 1
-expect_eq "address is in direct_cidrs" "$(nft -j list set inet egressd direct_cidrs | jq -r '.nftables[].set.elem // empty | .[]')" "$A"
+expect_eq "address is in direct_cidrs" "$(nft -j list set inet sandwall direct_cidrs | jq -r '.nftables[].set.elem // empty | .[]')" "$A"
 direct_ok "no_proxy address"
 
 log "no_proxy by name"
 stop_daemon
 start_daemon "${PROXY_FLAGS[@]}" --no-proxy ".attacker.test" || exit 1
-expect_eq "direct_cidrs emptied" "$(nft -j list set inet egressd direct_cidrs | jq -r '.nftables[].set.elem // empty | .[]')" ""
+expect_eq "direct_cidrs emptied" "$(nft -j list set inet sandwall direct_cidrs | jq -r '.nftables[].set.elem // empty | .[]')" ""
 expect_eq "b.attacker.test resolves" "$(dns_status t1 b.attacker.test)" NOERROR
 expect_eq "its address entered direct_$k" "$(direct_set)" "$A"
 direct_ok "no_proxy name"
@@ -125,7 +125,7 @@ if [[ -n "${REAL_PROXY:-}" ]]; then
 	log "real internet through the site proxy"
 	stop_daemon
 	start_daemon --upstream-proxy "$REAL_PROXY" || exit 1
-	expect_ok "create sandbox r1" egressd sandbox create r1 --policy "$P/m1.yaml"
+	expect_ok "create sandbox r1" sandwall sandbox create r1 --policy "$P/m1.yaml"
 	expect_eq "curl https://pypi.org succeeds" "$(sbx r1 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/)" 200
 	wait_log r1 "CONNECT pypi.org:443 logged" '.type=="relay" and .verdict=="allow" and .target=="pypi.org:443" and .proxy_status==200'
 	expect_eq "dig example.com is REFUSED" "$(dns_status r1 example.com)" REFUSED
@@ -133,7 +133,7 @@ if [[ -n "${REAL_PROXY:-}" ]]; then
 fi
 
 log "destroy and nuke"
-expect_ok "destroy t1" egressd sandbox destroy t1
-expect_ok "nuke" egressd nuke
+expect_ok "destroy t1" sandwall sandbox destroy t1
+expect_ok "nuke" sandwall nuke
 stop_daemon
 assert_no_remnants

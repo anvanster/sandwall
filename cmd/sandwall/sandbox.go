@@ -14,8 +14,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anvanster/egressd/internal/api"
-	"github.com/anvanster/egressd/internal/daemon"
+	"github.com/anvanster/sandwall/internal/api"
+	"github.com/anvanster/sandwall/internal/daemon"
 )
 
 // nobody/nogroup: exec-mode processes run unprivileged and capability-free.
@@ -76,7 +76,7 @@ func newSandboxExecCmd(g *globalFlags) *cobra.Command {
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.ArgsLenAtDash() != 1 {
-				return fmt.Errorf("usage: egressd sandbox exec <id> -- <cmd...>")
+				return fmt.Errorf("usage: sandwall sandbox exec <id> -- <cmd...>")
 			}
 			if err := requireRoot(); err != nil {
 				return err

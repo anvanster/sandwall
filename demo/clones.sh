@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# egressd demo: 20 Firecracker clones from one snapshot, live logs.
+# sandwall demo: 20 Firecracker clones from one snapshot, live logs.
 #
 # Every clone has the same guest IP (172.16.0.2), MAC and tap0, yet each
 # lives in its own netns with its own policy and log. Each guest runs a small
 # workload: an allowed fetch through its own name (c<N>.attacker.test) plus
-# a few things the policy blocks. `egressd logs -f` for every clone is merged
+# a few things the policy blocks. `sandwall logs -f` for every clone is merged
 # into one live stream, and a per-clone summary follows.
 #
 # Needs /dev/kvm. Usage (root, Linux):
-#   sudo EGRESSD=$PWD/bin/egressd demo/clones.sh
+#   sudo SANDWALL=$PWD/bin/sandwall demo/clones.sh
 # Environment: CLONES (default 20), DURATION seconds (default 30),
 #   CLONE_STAGGER (default 1s, needed on nested-virtualization hosts).
 set -uo pipefail
@@ -25,7 +25,7 @@ TAILS=()
 cleanup() {
 	((${#TAILS[@]})) && kill "${TAILS[@]}" 2>/dev/null
 	stop_daemon
-	"$EGRESSD" "${G[@]}" nuke >/dev/null 2>&1
+	"$SANDWALL" "${G[@]}" nuke >/dev/null 2>&1
 	teardown_attacker
 	rm -rf "$T"
 }
@@ -34,29 +34,29 @@ trap cleanup EXIT
 [[ -e /dev/kvm ]] || { echo "this demo needs /dev/kvm"; exit 1; }
 [[ -f "$FC_ASSETS/fc.json" ]] || bash "$DEMO_DIR/../test/e2e/fc-assets.sh" "$FC_ASSETS" || exit 1
 
-"$EGRESSD" "${G[@]}" nuke >/dev/null
+"$SANDWALL" "${G[@]}" nuke >/dev/null
 setup_attacker || exit 1
 start_daemon "${FC_FLAGS[@]}" || exit 1
 
 step "boot a base VM and snapshot it"
-"$EGRESSD" "${G[@]}" sandbox create base --mode vm --vm-config "$FC_ASSETS/fc.json" --policy "$DEMO_DIR/clone-policy.yaml"
+"$SANDWALL" "${G[@]}" sandbox create base --mode vm --vm-config "$FC_ASSETS/fc.json" --policy "$DEMO_DIR/clone-policy.yaml"
 wait_guest base || exit 1
-"$EGRESSD" "${G[@]}" vm snapshot base --out "$T/snap"
-"$EGRESSD" "${G[@]}" sandbox destroy base >/dev/null
+"$SANDWALL" "${G[@]}" vm snapshot base --out "$T/snap"
+"$SANDWALL" "${G[@]}" sandbox destroy base >/dev/null
 
 step "clone it $CLONES times"
 start=$(date +%s)
-"$EGRESSD" "${G[@]}" vm clone "$T/snap" --count "$CLONES" --prefix c --stagger "${CLONE_STAGGER:-1s}" \
+"$SANDWALL" "${G[@]}" vm clone "$T/snap" --count "$CLONES" --prefix c --stagger "${CLONE_STAGGER:-1s}" \
 	--policy "$DEMO_DIR/clone-policy.yaml" | column -t | sed 's/^/    /'
 printf '    %d clones in %ds\n' "$CLONES" $(($(date +%s) - start))
 for i in $(seq "$CLONES"); do wait_guest "c-$i" || exit 1; done
 ids=$(for i in $(seq "$CLONES"); do vmx "c-$i" "ip -4 -o addr show eth0 | awk '{print \$4}'; cat /sys/class/net/eth0/address"; done | sort | uniq -c)
 printf '    distinct guest identities across all clones:\n%s\n' "$(sed 's/^/    /' <<<"$ids")"
 
-step "live: egressd logs -f for every clone (${DURATION}s)"
+step "live: sandwall logs -f for every clone (${DURATION}s)"
 for i in $(seq "$CLONES"); do
-	# Process substitution, so $! is egressd itself and killing it ends jq too.
-	"$EGRESSD" "${G[@]}" logs "c-$i" -f > >(
+	# Process substitution, so $! is sandwall itself and killing it ends jq too.
+	"$SANDWALL" "${G[@]}" logs "c-$i" -f > >(
 		jq --unbuffered -r --arg red "$RED" --arg green "$GREEN" --arg reset "$RESET" '
 			(if .verdict == "allow" then $green else $red end) as $c |
 			"    \(.sandbox_id | (. + "     ")[:5]) \($c)\(.type | (. + "    ")[:4]) \(.verdict | (. + "       ")[:7])\($reset) " +

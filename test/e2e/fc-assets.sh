@@ -7,12 +7,12 @@
 #                         resolver pointing at the sandbox proxy (172.16.0.1)
 #                         and root SSH access for the generated test key
 #   id_ed25519            SSH key for reaching guests from their netns
-#   fc.json               a --vm-config for `egressd sandbox create --mode vm`
+#   fc.json               a --vm-config for `sandwall sandbox create --mode vm`
 #
-# Usage: sudo test/e2e/fc-assets.sh [dir]   (default /var/lib/egressd-fc)
+# Usage: sudo test/e2e/fc-assets.sh [dir]   (default /var/lib/sandwall-fc)
 set -euo pipefail
 
-OUT=${1:-/var/lib/egressd-fc}
+OUT=${1:-/var/lib/sandwall-fc}
 FC_VERSION=v1.17.0
 CI=v1.15 # newest Firecracker CI set with aarch64 guest artifacts
 KERNEL=vmlinux-6.1.155
@@ -37,7 +37,7 @@ if [[ ! -f vmlinux ]]; then
 fi
 
 if [[ ! -f id_ed25519 ]]; then
-	ssh-keygen -q -t ed25519 -N "" -C egressd-test -f id_ed25519
+	ssh-keygen -q -t ed25519 -N "" -C sandwall-test -f id_ed25519
 fi
 
 if [[ ! -f rootfs.ext4 ]]; then

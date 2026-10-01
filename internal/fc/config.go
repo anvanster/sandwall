@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/anvanster/egressd/internal/addressing"
+	"github.com/anvanster/sandwall/internal/addressing"
 )
 
 // Fixed guest network identity, identical in every sandbox.
@@ -33,7 +33,7 @@ const (
 
 var driveIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,32}$`)
 
-// VMConfig is a Firecracker --config-file. egressd owns networking, so a
+// VMConfig is a Firecracker --config-file. sandwall owns networking, so a
 // config must not contain network-interfaces; everything it does not know
 // about is passed through untouched.
 type VMConfig struct {
@@ -85,7 +85,7 @@ func ParseVMConfig(data []byte) (*VMConfig, error) {
 				cfg.Drives = append(cfg.Drives, drive)
 			}
 		case "network-interfaces":
-			return nil, errors.New("vm config: network-interfaces is managed by egressd; remove it")
+			return nil, errors.New("vm config: network-interfaces is managed by sandwall; remove it")
 		default:
 			cfg.Other[k] = v
 		}
@@ -140,7 +140,7 @@ func parseDrive(raw map[string]json.RawMessage) (Drive, error) {
 // DriveFile is the jail-relative file name for a drive.
 func DriveFile(driveID string) string { return "drive-" + driveID }
 
-// BootArgs returns the kernel command line with egressd's network settings:
+// BootArgs returns the kernel command line with sandwall's network settings:
 // any user ip= is replaced, and IPv6 is disabled.
 func BootArgs(user string) string {
 	var keep []string
@@ -191,7 +191,7 @@ type netIface struct {
 }
 
 // JailConfig renders the config file written into the jail: jail-relative
-// paths, egressd's boot args and the fixed tap0/MAC network interface.
+// paths, sandwall's boot args and the fixed tap0/MAC network interface.
 func JailConfig(cfg *VMConfig, limits RateLimits) ([]byte, error) {
 	out := make(map[string]any, len(cfg.Other)+4)
 	for k, v := range cfg.Other {

@@ -1,4 +1,4 @@
-# egressd
+# sandwall
 
 **An egress firewall for AI agent sandboxes: default-deny, domain allowlists that work behind CDNs, and a record of every connection, without touching the sandbox.**
 
@@ -8,7 +8,7 @@ Agent sandboxes isolate CPU and filesystem but usually leave the network wide op
 A prompt-injected agent can read a `.env` and POST it anywhere, or leak it a few bytes at a time through DNS query names.
 And when something goes wrong, nobody can answer "what did sandbox X connect to?"
 
-egressd gives every sandbox its own network namespace and enforces policy from the host side, where root inside the sandbox cannot reach it:
+sandwall gives every sandbox its own network namespace and enforces policy from the host side, where root inside the sandbox cannot reach it:
 
 - **Default-deny egress** with domain allowlists that keep working behind CDNs, and a TLS SNI / HTTP Host check so a shared CDN address does not open other sites.
 - **DNS that cannot be used for exfiltration**: queries for names that are not allowlisted are refused locally and never forwarded.
@@ -26,11 +26,11 @@ agent: HTTP POST http://10.99.0.1:8080/collect -> 200 'received'
 agent: DNS lookup of 4f50454e41495f4150...exfil.attacker.test -> 10.99.0.1
 => secrets exfiltrated
 
-== (b) egressd sandbox: default deny, allowlist 4 domains
+== (b) sandwall sandbox: default deny, allowlist 4 domains
 agent: HTTP POST http://10.99.0.1:8080/collect failed: <urlopen error timed out>
 agent: DNS lookup of 4f50454e41495f4150...exfil.attacker.test failed: [Errno -3] Temporary failure in name resolution
 => nothing left the sandbox
-egressd logs agent --deny-only:
+sandwall logs agent --deny-only:
     10:10:41.874  deny  deny/not_allowed  tcp 10.99.0.1:8080
     10:10:46.886  dns  refused/not_allowlisted  A 4f50454e41495f4150...exfil.attacker.test.
 ```
@@ -43,7 +43,7 @@ egressd logs agent --deny-only:
                                                   ▼
                               veth-s<k>  ⇄  veth-h<k>   (host netns)
                                                 │
-                     host nftables: table inet egressd
+                     host nftables: table inet sandwall
                        prerouting → sb_<k>  (policy for traffic leaving the host)
                        input   → sbin_<k>   (only DNS to this sandbox's proxy)
                        postrouting: masquerade to the uplink
@@ -52,7 +52,7 @@ egressd logs agent --deny-only:
 ```
 
 Sandbox *k* lives in netns `sb<k>`, connected to the host by a veth pair on `10.200.k.0/30`.
-Its resolver is `10.200.k.1`, where egressd runs a DNS proxy for that sandbox alone.
+Its resolver is `10.200.k.1`, where sandwall runs a DNS proxy for that sandbox alone.
 
 When the sandbox asks for an allowlisted name, the proxy resolves it upstream, puts the A records into the sandbox's nftables set `allow_<k>` with a timeout, and only then answers.
 Connections are allowed to IPs in that set, so allowlists keep working behind CDNs and rotating IPs.
@@ -63,26 +63,26 @@ Everything is keyed by sandbox, never by IP address.
 That is what lets Firecracker clones share one guest identity: each clone's `tap0` and `172.16.0.2` live in its own netns, which masquerades the guest to `10.200.k.2` before the host sees it.
 
 Rulesets are generated as text and applied atomically with `nft -f`.
-egressd only ever touches its own `inet egressd` table (and `ip egressd_vm` inside VM-mode namespaces).
+sandwall only ever touches its own `inet sandwall` table (and `ip sandwall_vm` inside VM-mode namespaces).
 
 ## Quickstart
 
 Requirements: Linux 5.10+, root, `nftables`, `iproute2`, `util-linux` (`setpriv`), and Go 1.26 to build.
 VM mode also needs `/dev/kvm` and the Firecracker `firecracker` and `jailer` binaries.
-Try it in a disposable VM: egressd changes host firewall rules and sysctls (it restores the sysctls on `nuke`).
+Try it in a disposable VM: sandwall changes host firewall rules and sysctls (it restores the sysctls on `nuke`).
 
 ```sh
-make build                              # bin/egressd
-sudo bin/egressd daemon &               # DNS proxies, log collectors, metrics on :9464, API on /run/egressd.sock
+make build                              # bin/sandwall
+sudo bin/sandwall daemon &               # DNS proxies, log collectors, metrics on :9464, API on /run/sandwall.sock
 
-sudo bin/egressd sandbox create agent --policy demo/policy.yaml
-sudo bin/egressd sandbox exec agent -- curl -sI https://pypi.org/    # allowed
-sudo bin/egressd sandbox exec agent -- curl -sI https://example.com/ # refused at DNS
-sudo bin/egressd logs agent -f --deny-only
+sudo bin/sandwall sandbox create agent --policy demo/policy.yaml
+sudo bin/sandwall sandbox exec agent -- curl -sI https://pypi.org/    # allowed
+sudo bin/sandwall sandbox exec agent -- curl -sI https://example.com/ # refused at DNS
+sudo bin/sandwall logs agent -f --deny-only
 
-sudo bin/egressd policy apply agent new-policy.yaml   # hot reload; established flows survive
-sudo bin/egressd sandbox destroy agent
-sudo bin/egressd nuke                                  # remove everything egressd created
+sudo bin/sandwall policy apply agent new-policy.yaml   # hot reload; established flows survive
+sudo bin/sandwall sandbox destroy agent
+sudo bin/sandwall nuke                                  # remove everything sandwall created
 ```
 
 ### SNI/Host check
@@ -100,22 +100,22 @@ Turn it off with `daemon --sni-check=false`.
 ### VM mode
 
 ```sh
-sudo test/e2e/fc-assets.sh /var/lib/egressd-fc      # firecracker, jailer, a guest kernel and rootfs, fc.json
-sudo bin/egressd daemon --firecracker /var/lib/egressd-fc/firecracker --jailer /var/lib/egressd-fc/jailer &
+sudo test/e2e/fc-assets.sh /var/lib/sandwall-fc      # firecracker, jailer, a guest kernel and rootfs, fc.json
+sudo bin/sandwall daemon --firecracker /var/lib/sandwall-fc/firecracker --jailer /var/lib/sandwall-fc/jailer &
 
-sudo bin/egressd sandbox create vm1 --mode vm --vm-config /var/lib/egressd-fc/fc.json --policy demo/policy.yaml
-sudo bin/egressd vm snapshot vm1 --out /srv/snapshots/base
-sudo bin/egressd vm clone /srv/snapshots/base --count 20 --policy demo/policy.yaml
+sudo bin/sandwall sandbox create vm1 --mode vm --vm-config /var/lib/sandwall-fc/fc.json --policy demo/policy.yaml
+sudo bin/sandwall vm snapshot vm1 --out /srv/snapshots/base
+sudo bin/sandwall vm clone /srv/snapshots/base --count 20 --policy demo/policy.yaml
 ```
 
-`--vm-config` is a regular Firecracker config file without `network-interfaces`; egressd owns the network.
+`--vm-config` is a regular Firecracker config file without `network-interfaces`; sandwall owns the network.
 Each VM runs as `jailer --netns /var/run/netns/sb<k>` under its own unprivileged uid (`--vm-uid-base`+k, default 2000000000+k; the daemon checks that nothing else on the host uses those ids), and the guest network comes from the kernel command line (`ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off`).
 Bandwidth limits are applied both by tc on the host and by Firecracker's own rate limiters.
 
 ### Behind an HTTP proxy
 
 On networks where only an HTTP proxy reaches the internet, start the daemon with `--upstream-proxy http://[user:pass@]host:port`, or `--upstream-proxy-from-env` to take it from `https_proxy`/`http_proxy` and `no_proxy` (`sudo` drops those unless preserved, e.g. `sudo --preserve-env=https_proxy,http_proxy,no_proxy`).
-The proxy is a next hop, not a destination: the sandbox needs no proxy settings and still connects to real addresses, and egressd still applies the policy to them.
+The proxy is a next hop, not a destination: the sandbox needs no proxy settings and still connects to real addresses, and sandwall still applies the policy to them.
 Allowed TCP, on every port, then goes to the relay (see above), which tunnels it through the proxy:
 
 - TLS: `CONNECT <SNI>:<port>`. The SNI must be allowlisted (or the address inside `allow_cidrs`), otherwise the connection is reset and logged as `sni_mismatch`.
@@ -168,8 +168,8 @@ With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (for
 ## Quarantine
 
 ```sh
-sudo bin/egressd sandbox quarantine agent --reason "DNS tunnel attempt" [--freeze]
-sudo bin/egressd sandbox release agent
+sudo bin/sandwall sandbox quarantine agent --reason "DNS tunnel attempt" [--freeze]
+sudo bin/sandwall sandbox release agent
 ```
 
 `quarantine` cuts a sandbox off at once and keeps it for forensics:
@@ -186,7 +186,7 @@ The quarantine is persisted and survives a daemon restart, and `policy apply` do
 
 ## Observability
 
-Each sandbox has a JSONL log at `/var/log/egressd/<id>.jsonl`; `egressd logs <id> [-f] [--deny-only]` prints it.
+Each sandbox has a JSONL log at `/var/log/sandwall/<id>.jsonl`; `sandwall logs <id> [-f] [--deny-only]` prints it.
 Logs outlive the sandbox.
 
 | `type` | Fields |
@@ -205,20 +205,20 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 
 | Metric | Extra label |
 |---|---|
-| `egressd_flows_total` | `verdict` |
-| `egressd_bytes_total` | `direction` (`out` = sandbox to world) |
-| `egressd_dns_queries_total` | `verdict` |
-| `egressd_denied_total` | `reason` |
-| `egressd_relay_connections_total` | `result` (`ok`, `denied`, `refused`, `error`) |
-| `egressd_quarantined` (gauge) | |
+| `sandwall_flows_total` | `verdict` |
+| `sandwall_bytes_total` | `direction` (`out` = sandbox to world) |
+| `sandwall_dns_queries_total` | `verdict` |
+| `sandwall_denied_total` | `reason` |
+| `sandwall_relay_connections_total` | `result` (`ok`, `denied`, `refused`, `error`) |
+| `sandwall_quarantined` (gauge) | |
 
 ## Threat model
 
 **In scope:** code running inside a sandbox, including as root inside a VM guest, that wants to send data somewhere it should not, or reach the host, its network, cloud metadata or other sandboxes.
 
-**What egressd assumes:**
+**What sandwall assumes:**
 
-- The host and the egressd daemon are trusted, and only root can reach the API socket (`/run/egressd.sock`, mode 0600).
+- The host and the sandwall daemon are trusted, and only root can reach the API socket (`/run/sandwall.sock`, mode 0600).
 - Exec-mode processes run as `nobody` without capabilities, so they cannot change addresses, routes or firewall rules in their netns.
 - In VM mode the guest is fully untrusted. It only controls its own kernel; everything that enforces policy lives in the netns or on the host.
 
@@ -234,7 +234,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 ## Known gaps
 
 - **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, the SNI/Host check stops TLS and HTTP to it on ports 80 and 443 (any port behind an upstream proxy). Other ports, `no_proxy` destinations and `--sni-check=false` leave it reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup).
-- **Domain fronting.** Without TLS interception, the HTTP `Host` inside TLS is invisible, so a CDN that routes by that header can be reached through an allowlisted SNI. TLS Encrypted Client Hello would hide the SNI too; egressd suppresses the HTTPS/SVCB records that carry ECH configs, and a client without them sends a cleartext SNI.
+- **Domain fronting.** Without TLS interception, the HTTP `Host` inside TLS is invisible, so a CDN that routes by that header can be reached through an allowlisted SNI. TLS Encrypted Client Hello would hide the SNI too; sandwall suppresses the HTTPS/SVCB records that carry ECH configs, and a client without them sends a cleartext SNI.
 - **Allowlisted names are an exfiltration channel if their owner is hostile.** A wildcard such as `*.example.com` lets the sandbox query any subdomain, and those queries do reach `example.com`'s nameservers. Only allowlist zones you trust.
 - **Connection-limit recovery is lazy.** The kernel's `ct count` prunes closed and rejected connections only when new ones are attempted. Right after a burst, the limit can be stricter than configured for a few seconds. It never lets more connections through.
 - **No IPv6.** It is disabled inside sandboxes. AAAA, HTTPS and SVCB queries get empty answers, so clients fall back to IPv4.
@@ -253,9 +253,14 @@ make e2e REAL_PROXY=http://host:port         # on a host without direct internet
                                              # and e2e-proxy also fetches real sites through it
 ```
 
-Every e2e script starts and ends with `egressd nuke`, uses its own state and log directories, and checks that nothing egressd created is left behind.
+Every e2e script starts and ends with `sandwall nuke`, uses its own state and log directories, and checks that nothing sandwall created is left behind.
 The "attacker" endpoint is a local listener in its own netns at `10.99.0.1`, so only the allowlist checks need the internet; the proxy test runs a fake upstream proxy there too.
 VM-mode paths are configurable for keeping snapshots and jails on one (reflink-capable) filesystem: `make e2e-m3 FC_ASSETS=… CHROOT_BASE=… E2E_TMP=…`.
 
-The demos are `demo/exfil.sh` (the comparison above) and `demo/clones.sh` (20 Firecracker clones with a live, merged `egressd logs -f`).
+The demos are `demo/exfil.sh` (the comparison above) and `demo/clones.sh` (20 Firecracker clones with a live, merged `sandwall logs -f`).
 On nested-virtualization hosts, such as a Lima VM on Apple silicon, start many VMs with `vm clone --stagger 1s`; see DECISIONS.md.
+
+## License
+
+Copyright 2026 Andrey Vasilevsky.
+Licensed under the [Apache License, Version 2.0](LICENSE).

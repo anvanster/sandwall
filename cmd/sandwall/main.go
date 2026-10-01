@@ -1,6 +1,6 @@
 //go:build linux
 
-// Command egressd is the egress firewall daemon and its CLI.
+// Command sandwall is the egress firewall daemon and its CLI.
 package main
 
 import (
@@ -12,9 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anvanster/egressd/internal/api"
-	"github.com/anvanster/egressd/internal/daemon"
-	"github.com/anvanster/egressd/internal/fc"
+	"github.com/anvanster/sandwall/internal/api"
+	"github.com/anvanster/sandwall/internal/daemon"
+	"github.com/anvanster/sandwall/internal/fc"
 )
 
 type globalFlags struct {
@@ -28,7 +28,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := newRootCmd().ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "egressd:", err)
+		fmt.Fprintln(os.Stderr, "sandwall:", err)
 		os.Exit(1)
 	}
 }
@@ -36,7 +36,7 @@ func main() {
 func newRootCmd() *cobra.Command {
 	g := &globalFlags{}
 	root := &cobra.Command{
-		Use:           "egressd",
+		Use:           "sandwall",
 		Short:         "Egress firewall for AI agent sandboxes",
 		SilenceUsage:  true,
 		SilenceErrors: true,
