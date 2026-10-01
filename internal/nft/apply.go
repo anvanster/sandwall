@@ -28,3 +28,17 @@ func Apply(ctx context.Context, script string) error {
 	}
 	return nil
 }
+
+// ApplyInNetns runs a rendered script through `nft -f -` inside a named netns.
+func ApplyInNetns(ctx context.Context, netnsName, script string) error {
+	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ip", "netns", "exec", netnsName, "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nft -f in %s: %w: %s\n--- script ---\n%s", netnsName, err, strings.TrimSpace(stderr.String()), script)
+	}
+	return nil
+}

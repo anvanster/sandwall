@@ -340,3 +340,41 @@ func joinAddrs(entries []AllowEntry) string {
 	}
 	return strings.Join(s, ", ")
 }
+
+// NetnsTable is the table egressd owns inside a VM-mode sandbox netns.
+const NetnsTable = "egressd_vm"
+
+// RenderVMNetns renders the ruleset inside a VM-mode sandbox's netns:
+//   - guest DNS to 172.16.0.1 is DNATed to the sandbox's proxy;
+//   - guest traffic leaving via veth-s<k> is masqueraded to 10.200.k.2, so the
+//     host enforces policy exactly as for exec mode;
+//   - only the guest address may be forwarded (no spoofing), and the guest
+//     cannot reach the netns itself except for replies to connections the
+//     netns opened (the control channel).
+//
+// DNS to any other server is forwarded unchanged, so the host still sees
+// and logs it as a bypass attempt.
+func RenderVMNetns(k int) (string, error) {
+	sb, err := addressing.For(k)
+	if err != nil {
+		return "", err
+	}
+	var b builder
+	t := NetnsTable
+	tap := addressing.TapName
+	b.line("add table ip %s", t)
+	b.line("delete table ip %s", t)
+	b.line("add table ip %s", t)
+	b.line("add chain ip %s prerouting { type nat hook prerouting priority dstnat; policy accept; }", t)
+	b.line("add rule ip %s prerouting iifname %q ip daddr %s meta l4proto { tcp, udp } th dport 53 dnat to %s:53",
+		t, tap, addressing.TapAddr, sb.HostAddr)
+	b.line("add chain ip %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", t)
+	b.line("add rule ip %s postrouting ip saddr %s oifname %q masquerade", t, addressing.GuestAddr, sb.NsVeth)
+	b.line("add chain ip %s forward { type filter hook forward priority filter; policy drop; }", t)
+	b.line("add rule ip %s forward iifname %q oifname %q ip saddr %s accept", t, tap, sb.NsVeth, addressing.GuestAddr)
+	b.line("add rule ip %s forward iifname %q oifname %q ct state established,related accept", t, sb.NsVeth, tap)
+	b.line("add chain ip %s input { type filter hook input priority filter; policy accept; }", t)
+	b.line("add rule ip %s input iifname %q ct state established,related accept", t, tap)
+	b.line("add rule ip %s input iifname %q drop", t, tap)
+	return b.String(), nil
+}

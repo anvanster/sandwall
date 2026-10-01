@@ -333,3 +333,45 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	return os.Rename(tmp.Name(), path)
 }
+
+// SetupVM adds VM-mode plumbing to a sandbox netns: tap0 (owned by the VMM's
+// uid/gid, 172.16.0.1/30) and IPv4 forwarding inside the netns. It is
+// idempotent; an existing tap0 is kept because a running VM holds it open.
+func SetupVM(sb addressing.Sandbox, uid int) error {
+	nsh, err := netns.GetFromName(sb.Netns)
+	if err != nil {
+		return fmt.Errorf("netns %s: %w", sb.Netns, err)
+	}
+	defer nsh.Close()
+	err = inNetns(nsh, func() error {
+		if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
+			return err
+		}
+		tap, err := netlink.LinkByName(addressing.TapName)
+		if err != nil {
+			t := &netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: addressing.TapName},
+				Mode:      netlink.TUNTAP_MODE_TAP,
+				Flags:     netlink.TUNTAP_NO_PI | netlink.TUNTAP_VNET_HDR | netlink.TUNTAP_ONE_QUEUE,
+				Owner:     uint32(uid),
+				Group:     uint32(uid),
+			}
+			// Tuntap creation is an ioctl on /dev/net/tun, so it must run
+			// on a thread inside the netns rather than via a netns handle.
+			if err := netlink.LinkAdd(t); err != nil {
+				return fmt.Errorf("create %s: %w", addressing.TapName, err)
+			}
+			if tap, err = netlink.LinkByName(addressing.TapName); err != nil {
+				return err
+			}
+		}
+		if err := netlink.AddrReplace(tap, addr(addressing.TapAddr, 30)); err != nil {
+			return fmt.Errorf("address on %s: %w", addressing.TapName, err)
+		}
+		return netlink.LinkSetUp(tap)
+	})
+	if err != nil {
+		return fmt.Errorf("vm plumbing in %s: %w", sb.Netns, err)
+	}
+	return nil
+}

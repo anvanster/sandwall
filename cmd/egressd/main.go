@@ -14,12 +14,14 @@ import (
 
 	"github.com/anvanster/egressd/internal/api"
 	"github.com/anvanster/egressd/internal/daemon"
+	"github.com/anvanster/egressd/internal/fc"
 )
 
 type globalFlags struct {
-	socket   string
-	stateDir string
-	logDir   string
+	socket     string
+	stateDir   string
+	logDir     string
+	chrootBase string
 }
 
 func main() {
@@ -42,11 +44,13 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&g.socket, "socket", api.DefaultSocket, "daemon API socket")
 	root.PersistentFlags().StringVar(&g.stateDir, "state-dir", daemon.DefaultStateDir, "daemon state directory")
 	root.PersistentFlags().StringVar(&g.logDir, "log-dir", daemon.DefaultLogDir, "per-sandbox JSONL log directory")
+	root.PersistentFlags().StringVar(&g.chrootBase, "chroot-base", fc.DefaultChrootBase, "jailer chroot base directory for VM mode")
 
 	root.AddCommand(
 		newDaemonCmd(g),
 		newSandboxCmd(g),
 		newPolicyCmd(g),
+		newVMCmd(g),
 		newLogsCmd(g),
 		newNukeCmd(g),
 	)

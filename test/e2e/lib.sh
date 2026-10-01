@@ -73,8 +73,9 @@ wait_log() {
 	[[ -f "$file" ]] && tail -n 5 "$file" | sed 's/^/        /'
 }
 
+# start_daemon [extra daemon flags...]
 start_daemon() {
-	"$EGRESSD" "${G[@]}" daemon --blocked-exempt 10.99.0.0/24 --metrics-addr 127.0.0.1:19464 \
+	"$EGRESSD" "${G[@]}" daemon --blocked-exempt 10.99.0.0/24 --metrics-addr 127.0.0.1:19464 "$@" \
 		>>"$T/daemon.log" 2>&1 &
 	DAEMON_PID=$!
 	for _ in $(seq 50); do
@@ -155,6 +156,43 @@ teardown_attacker() {
 	return 0
 }
 
+# --- VM mode -------------------------------------------------------------
+
+FC_ASSETS=${FC_ASSETS:-/var/lib/egressd-fc}
+FC_FLAGS=(--firecracker "$FC_ASSETS/firecracker" --jailer "$FC_ASSETS/jailer")
+
+sb_field() { egressd sandbox list --json | jq -r --arg id "$1" ".[] | select(.id==\$id) | $2"; }
+
+# vmx <id> <remote command>: run a command in the sandbox's guest over SSH
+# from inside its netns (the netns reaches the guest directly on tap0).
+# ssh joins arguments into one remote command line, so quote accordingly.
+vmx() {
+	local id=$1; shift
+	ip netns exec "$(sb_field "$id" .netns)" ssh -i "$FC_ASSETS/id_ed25519" \
+		-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+		-o ConnectTimeout=30 -o BatchMode=yes root@172.16.0.2 "$@"
+}
+
+vm_dns_status() {
+	local id=$1; shift
+	vmx "$id" dig +tries=1 +time=3 "$@" | awk '/status:/ {gsub(",", "", $6); print $6}'
+}
+
+# wait_guest <id>: wait until the guest answers SSH (up to 60s).
+wait_guest() {
+	for _ in $(seq 120); do
+		vmx "$1" true 2>/dev/null && return 0
+		sleep 0.5
+	done
+	echo "guest $1 not reachable" >&2
+	return 1
+}
+
+# fc_api <id> <path>: GET from the sandbox's Firecracker API.
+fc_api() {
+	curl -s --unix-socket "$(sb_field "$1" .vm.jail_root)/run/firecracker.socket" "http://localhost$2"
+}
+
 # assert_no_remnants: nothing egressd-owned is left on the host.
 assert_no_remnants() {
 	expect_eq "no sb<k> netns left" "$(ip netns list | grep -cE '^sb[0-9]+')" 0
@@ -163,6 +201,8 @@ assert_no_remnants() {
 	expect_eq "no egressd nft table left" "$(nft list tables | grep -c egressd)" 0
 	expect_eq "no tc qdiscs on sandbox veths" "$(tc qdisc show | grep -c veth-h)" 0
 	expect_eq "no /etc/netns/sb<k> left" "$(find /etc/netns -maxdepth 1 -name 'sb[0-9]*' 2>/dev/null | wc -l)" 0
+	expect_eq "no firecracker processes left" "$(pgrep -c -f 'firecracker --id egressd-sb' || true)" 0
+	expect_eq "no egressd jails left" "$(find /srv/jailer -mindepth 2 -maxdepth 2 -name 'egressd-sb*' 2>/dev/null | wc -l)" 0
 }
 
 finish() {

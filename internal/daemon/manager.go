@@ -1,8 +1,8 @@
 //go:build linux
 
 // Package daemon owns sandbox lifecycle. It is the only place that knows how
-// netns, nft, dnsproxy, flowlog and metrics fit together; internal/api is
-// just a transport in front of it.
+// netns, nft, shaper, dnsproxy, fc, flowlog and metrics fit together;
+// internal/api is just a transport in front of it.
 package daemon
 
 import (
@@ -24,6 +24,7 @@ import (
 
 	"github.com/anvanster/egressd/internal/addressing"
 	"github.com/anvanster/egressd/internal/dnsproxy"
+	"github.com/anvanster/egressd/internal/fc"
 	"github.com/anvanster/egressd/internal/flowlog"
 	"github.com/anvanster/egressd/internal/metrics"
 	"github.com/anvanster/egressd/internal/netns"
@@ -44,6 +45,9 @@ const (
 	DefaultLogDir   = "/var/log/egressd"
 )
 
+// MaxClones bounds one clone request.
+const MaxClones = 200
+
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
 
 // ErrNotFound is returned for unknown sandbox IDs.
@@ -60,8 +64,11 @@ type Options struct {
 	BlockedExempt []netip.Prefix
 	// DefaultUpstream is used when a policy has no upstream_dns.
 	DefaultUpstream string
-	Log             *slog.Logger
-	Metrics         *metrics.Metrics
+	// FC locates firecracker and jailer for VM mode. VM mode is unavailable
+	// when either binary is unset.
+	FC      fc.Paths
+	Log     *slog.Logger
+	Metrics *metrics.Metrics
 }
 
 // Record is the persisted description of a sandbox.
@@ -71,6 +78,9 @@ type Record struct {
 	Mode    string    `json:"mode"`
 	Policy  string    `json:"policy"` // original YAML
 	Created time.Time `json:"created"`
+	// VM mode: exactly one of VMConfig (boot) or Snapshot (clone) is set.
+	VMConfig string `json:"vm_config,omitempty"`
+	Snapshot string `json:"snapshot,omitempty"`
 }
 
 // Info is the API view of a sandbox.
@@ -85,6 +95,16 @@ type Info struct {
 	Created  time.Time      `json:"created"`
 	Policy   *policy.Policy `json:"policy"`
 	LogPath  string         `json:"log_path"`
+	VM       *VMInfo        `json:"vm,omitempty"`
+}
+
+// VMInfo describes a VM-mode sandbox's microVM.
+type VMInfo struct {
+	Running    bool   `json:"running"`
+	GuestAddr  string `json:"guest_addr"`
+	JailRoot   string `json:"jail_root"`
+	ConsoleLog string `json:"console_log"`
+	ClonedFrom string `json:"cloned_from,omitempty"`
 }
 
 type sandbox struct {
@@ -101,6 +121,10 @@ type Manager struct {
 	sink *flowlog.Sink
 	m    *metrics.Metrics
 
+	// opMu serializes lifecycle operations, which may take seconds (VM
+	// boot, image copies). mu only guards the maps, so log collectors'
+	// lookups never wait behind a lifecycle operation.
+	opMu    sync.Mutex
 	mu      sync.Mutex
 	byID    map[string]*sandbox
 	byIndex map[int]*sandbox
@@ -114,6 +138,9 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 	}
 	if opts.LogDir == "" {
 		opts.LogDir = DefaultLogDir
+	}
+	if opts.FC.ChrootBase == "" {
+		opts.FC.ChrootBase = fc.DefaultChrootBase
 	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
@@ -165,6 +192,17 @@ func (mgr *Manager) recordPath(id string) string {
 	return filepath.Join(mgr.recordsDir(), id+".json")
 }
 
+func (mgr *Manager) vm(sb addressing.Sandbox, id string) fc.VM {
+	return fc.VM{Paths: mgr.opts.FC, Sandbox: sb, ConsoleLog: filepath.Join(mgr.opts.LogDir, id+".console.log")}
+}
+
+func (mgr *Manager) vmAvailable() error {
+	if mgr.opts.FC.Firecracker == "" || mgr.opts.FC.Jailer == "" {
+		return errors.New("vm mode needs the daemon started with --firecracker and --jailer")
+	}
+	return nil
+}
+
 // ensureHost applies host sysctls and the base ruleset. Idempotent, so it
 // also recovers from a nuke run while the daemon was up.
 func (mgr *Manager) ensureHost(ctx context.Context) error {
@@ -186,6 +224,8 @@ func (mgr *Manager) restore(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -204,72 +244,142 @@ func (mgr *Manager) restore(ctx context.Context) error {
 			mgr.log.Error("skipping sandbox with invalid stored policy", "id", rec.ID, "err", err)
 			continue
 		}
-		mgr.mu.Lock()
-		err = mgr.setupLocked(ctx, rec, pol, true)
-		mgr.mu.Unlock()
-		if err != nil {
+		if err := mgr.setup(ctx, rec, pol, true); err != nil {
 			mgr.log.Error("failed to restore sandbox", "id", rec.ID, "err", err)
 			continue
 		}
-		mgr.log.Info("restored sandbox", "id", rec.ID, "index", rec.Index)
+		mgr.log.Info("restored sandbox", "id", rec.ID, "index", rec.Index, "mode", rec.Mode)
 	}
 	return nil
 }
 
-// Create builds a new sandbox.
-func (mgr *Manager) Create(ctx context.Context, id, mode, policyYAML string) (Info, error) {
-	if !idPattern.MatchString(id) {
-		return Info{}, fmt.Errorf("invalid sandbox id %q: use 1-63 of [a-zA-Z0-9_.-], starting alphanumeric", id)
-	}
+// Create builds a new sandbox. vmConfig is the Firecracker config JSON for
+// vm mode and must be empty for exec mode.
+func (mgr *Manager) Create(ctx context.Context, id, mode, policyYAML, vmConfig string) (Info, error) {
 	switch mode {
 	case "", ModeExec:
 		mode = ModeExec
+		if vmConfig != "" {
+			return Info{}, errors.New("a vm config only applies to --mode vm")
+		}
 	case ModeVM:
-		return Info{}, errors.New("vm mode is not implemented yet (milestone M3)")
+		if err := mgr.vmAvailable(); err != nil {
+			return Info{}, err
+		}
+		if vmConfig == "" {
+			return Info{}, errors.New("vm mode needs --vm-config")
+		}
+		if _, err := fc.ParseVMConfig([]byte(vmConfig)); err != nil {
+			return Info{}, err
+		}
 	default:
 		return Info{}, fmt.Errorf("unknown mode %q", mode)
 	}
-	pol, err := policy.Parse([]byte(policyYAML))
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
+	return mgr.create(ctx, Record{ID: id, Mode: mode, Policy: policyYAML, VMConfig: vmConfig})
+}
+
+// MaxStagger bounds the pause between clone starts.
+const MaxStagger = time.Minute
+
+// Clone starts count VM sandboxes from a snapshot directory, named
+// <prefix>-1 ... <prefix>-<count>, all with the given policy, waiting
+// stagger between VM starts. It stops at the first failure and returns the
+// clones created so far.
+func (mgr *Manager) Clone(ctx context.Context, snapshotDir string, count int, prefix, policyYAML string, stagger time.Duration) ([]Info, error) {
+	if err := mgr.vmAvailable(); err != nil {
+		return nil, err
+	}
+	if count < 1 || count > MaxClones {
+		return nil, fmt.Errorf("count must be between 1 and %d", MaxClones)
+	}
+	if stagger < 0 || stagger > MaxStagger {
+		return nil, fmt.Errorf("stagger must be between 0 and %s", MaxStagger)
+	}
+	dir, err := filepath.Abs(snapshotDir)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fc.ReadSnapshotMeta(dir); err != nil {
+		return nil, err
+	}
+	if prefix == "" {
+		prefix = "clone"
+	}
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
+	var out []Info
+	for i := 1; i <= count; i++ {
+		if i > 1 && stagger > 0 {
+			select {
+			case <-ctx.Done():
+				return out, ctx.Err()
+			case <-time.After(stagger):
+			}
+		}
+		info, err := mgr.create(ctx, Record{
+			ID: fmt.Sprintf("%s-%d", prefix, i), Mode: ModeVM, Policy: policyYAML, Snapshot: dir,
+		})
+		if err != nil {
+			return out, fmt.Errorf("clone %d of %d: %w", i, count, err)
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
+// create runs with opMu held.
+func (mgr *Manager) create(ctx context.Context, rec Record) (Info, error) {
+	if !idPattern.MatchString(rec.ID) {
+		return Info{}, fmt.Errorf("invalid sandbox id %q: use 1-63 of [a-zA-Z0-9_.-], starting alphanumeric", rec.ID)
+	}
+	pol, err := policy.Parse([]byte(rec.Policy))
 	if err != nil {
 		return Info{}, err
 	}
-
 	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	if _, ok := mgr.byID[id]; ok {
-		return Info{}, fmt.Errorf("%w: %s", ErrExists, id)
+	_, exists := mgr.byID[rec.ID]
+	mgr.mu.Unlock()
+	if exists {
+		return Info{}, fmt.Errorf("%w: %s", ErrExists, rec.ID)
 	}
-	k, err := mgr.allocIndexLocked()
+	k, err := mgr.allocIndex()
 	if err != nil {
 		return Info{}, err
 	}
 	if err := mgr.ensureHost(ctx); err != nil {
 		return Info{}, err
 	}
-	rec := Record{ID: id, Index: k, Mode: mode, Policy: policyYAML, Created: time.Now().UTC()}
-	if err := mgr.setupLocked(ctx, rec, pol, false); err != nil {
-		if cerr := mgr.teardown(ctx, addressing.MustFor(k)); cerr != nil {
-			mgr.log.Error("rollback after failed create", "id", id, "err", cerr)
+	rec.Index = k
+	rec.Created = time.Now().UTC()
+	if err := mgr.setup(ctx, rec, pol, false); err != nil {
+		mgr.unregister(rec.ID, k)
+		_ = mgr.sink.Close(rec.ID)
+		if cerr := mgr.teardown(ctx, rec.ID, addressing.MustFor(k)); cerr != nil {
+			mgr.log.Error("rollback after failed create", "id", rec.ID, "err", cerr)
 		}
 		return Info{}, err
 	}
 	if err := mgr.persist(rec); err != nil {
-		mgr.destroyLocked(ctx, mgr.byID[id])
+		_ = mgr.destroy(ctx, rec.ID)
 		return Info{}, err
 	}
-	mgr.log.Info("created sandbox", "id", id, "index", k, "mode", mode)
-	return mgr.infoLocked(mgr.byID[id]), nil
+	mgr.log.Info("created sandbox", "id", rec.ID, "index", k, "mode", rec.Mode)
+	return mgr.Get(rec.ID)
 }
 
-// allocIndexLocked picks the lowest free index that also has no leftovers
-// on the host from a previous run.
-func (mgr *Manager) allocIndexLocked() (int, error) {
+// allocIndex picks the lowest free index that also has no leftovers on the
+// host from a previous run. Runs with opMu held.
+func (mgr *Manager) allocIndex() (int, error) {
 	stale := map[int]bool{}
 	if left, err := netns.Leftovers(); err == nil {
 		for _, k := range left {
 			stale[k] = true
 		}
 	}
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
 	for k := addressing.MinIndex; k <= addressing.MaxIndex; k++ {
 		if _, used := mgr.byIndex[k]; !used && !stale[k] {
 			return k, nil
@@ -278,10 +388,10 @@ func (mgr *Manager) allocIndexLocked() (int, error) {
 	return 0, errors.New("no free sandbox index")
 }
 
-// setupLocked brings every piece of a sandbox to the desired state. It is
-// idempotent; restoring passes preserveAllowed to keep DNS-learned set
-// entries made before the daemon restarted.
-func (mgr *Manager) setupLocked(ctx context.Context, rec Record, pol *policy.Policy, preserveAllowed bool) error {
+// setup brings every piece of a sandbox to the desired state and registers
+// it. It is idempotent; restoring keeps DNS-learned allow-set entries and
+// adopts a VM that is still running. Runs with opMu held.
+func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, restoring bool) error {
 	sb, err := addressing.For(rec.Index)
 	if err != nil {
 		return err
@@ -292,12 +402,25 @@ func (mgr *Manager) setupLocked(ctx context.Context, rec Record, pol *policy.Pol
 	if err := shaper.Apply(ctx, sb, shapeLimits(pol)); err != nil {
 		return err
 	}
-	if rec.Mode == ModeExec {
+	vm := mgr.vm(sb, rec.ID)
+	switch rec.Mode {
+	case ModeExec:
 		if err := netns.WriteResolvConf(sb); err != nil {
 			return err
 		}
+	case ModeVM:
+		if err := netns.SetupVM(sb, vm.UID()); err != nil {
+			return err
+		}
+		script, err := nft.RenderVMNetns(sb.Index)
+		if err != nil {
+			return err
+		}
+		if err := nft.ApplyInNetns(ctx, sb.Netns, script); err != nil {
+			return err
+		}
 	}
-	script, err := nft.RenderSandbox(sandboxRules(sb.Index, pol, nil, preserveAllowed))
+	script, err := nft.RenderSandbox(sandboxRules(sb.Index, pol, nil, restoring))
 	if err != nil {
 		return err
 	}
@@ -320,9 +443,32 @@ func (mgr *Manager) setupLocked(ctx context.Context, rec Record, pol *policy.Pol
 		return err
 	}
 	s := &sandbox{rec: rec, addr: sb, policy: pol, proxy: proxy}
+	mgr.mu.Lock()
 	mgr.byID[rec.ID] = s
 	mgr.byIndex[sb.Index] = s
+	mgr.mu.Unlock()
+
+	// The VM starts last: its DNS and policy are in place before it boots.
+	if rec.Mode == ModeVM && !(restoring && vm.Alive()) {
+		if err := mgr.startVM(ctx, vm, rec, pol); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (mgr *Manager) startVM(ctx context.Context, vm fc.VM, rec Record, pol *policy.Policy) error {
+	if err := mgr.vmAvailable(); err != nil {
+		return err
+	}
+	if rec.Snapshot != "" {
+		return vm.Restore(ctx, rec.Snapshot, vmLimits(pol))
+	}
+	cfg, err := fc.ParseVMConfig([]byte(rec.VMConfig))
+	if err != nil {
+		return err
+	}
+	return vm.Boot(ctx, cfg, vmLimits(pol))
 }
 
 func sandboxRules(k int, pol *policy.Policy, allowed []nft.AllowEntry, preserve bool) nft.SandboxConfig {
@@ -340,6 +486,10 @@ func shapeLimits(pol *policy.Policy) shaper.Limits {
 	return shaper.Limits{EgressBits: pol.EgressBitsPerSec(), IngressBits: pol.IngressBitsPerSec()}
 }
 
+func vmLimits(pol *policy.Policy) fc.RateLimits {
+	return fc.RateLimits{TxBits: pol.EgressBitsPerSec(), RxBits: pol.IngressBitsPerSec()}
+}
+
 func (mgr *Manager) proxySettings(pol *policy.Policy) dnsproxy.Settings {
 	up := pol.UpstreamDNS
 	if up == "" {
@@ -354,17 +504,17 @@ func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry) error {
 
 // ApplyPolicy hot-reloads a sandbox's policy: the chain is re-rendered and
 // the allow sets flushed and repopulated in one transaction, so established
-// flows survive.
+// flows survive. tc and Firecracker limits follow.
 func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Info, error) {
 	pol, err := policy.Parse([]byte(policyYAML))
 	if err != nil {
 		return Info{}, err
 	}
-	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	s, ok := mgr.byID[id]
-	if !ok {
-		return Info{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
+	s, err := mgr.lookup(id)
+	if err != nil {
+		return Info{}, err
 	}
 	if err := mgr.ensureHost(ctx); err != nil {
 		return Info{}, err
@@ -384,45 +534,84 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 	if err := shaper.Apply(ctx, s.addr, shapeLimits(pol)); err != nil {
 		return Info{}, fmt.Errorf("policy applied to firewall and DNS but not to tc: %w", err)
 	}
+	if s.rec.Mode == ModeVM {
+		if vm := mgr.vm(s.addr, id); vm.Alive() {
+			if err := vm.SetRateLimits(ctx, vmLimits(pol)); err != nil {
+				return Info{}, fmt.Errorf("policy applied to firewall, DNS and tc but not to the VM: %w", err)
+			}
+		}
+	}
 	rec := s.rec
 	rec.Policy = policyYAML
 	if err := mgr.persist(rec); err != nil {
 		return Info{}, err
 	}
-	s.rec, s.policy = rec, pol
-	mgr.log.Info("applied policy", "id", id)
-	return mgr.infoLocked(s), nil
-}
-
-// Destroy removes a sandbox and everything it created. Its log is kept.
-func (mgr *Manager) Destroy(ctx context.Context, id string) error {
 	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	s, ok := mgr.byID[id]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrNotFound, id)
-	}
-	return mgr.destroyLocked(ctx, s)
+	s.rec, s.policy = rec, pol
+	mgr.mu.Unlock()
+	mgr.log.Info("applied policy", "id", id)
+	return mgr.Get(id)
 }
 
-func (mgr *Manager) destroyLocked(ctx context.Context, s *sandbox) error {
+// Snapshot writes a VM sandbox's snapshot to outDir, for `vm clone`.
+func (mgr *Manager) Snapshot(ctx context.Context, id, outDir string) error {
+	if err := mgr.vmAvailable(); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(outDir) {
+		return errors.New("snapshot output directory must be an absolute path")
+	}
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
+	s, err := mgr.lookup(id)
+	if err != nil {
+		return err
+	}
+	if s.rec.Mode != ModeVM {
+		return fmt.Errorf("sandbox %s is in %s mode; only vm sandboxes can be snapshotted", id, s.rec.Mode)
+	}
+	vm := mgr.vm(s.addr, id)
+	if !vm.Alive() {
+		return fmt.Errorf("sandbox %s: VM is not running", id)
+	}
+	if err := vm.Snapshot(ctx, id, outDir); err != nil {
+		return err
+	}
+	mgr.log.Info("snapshotted sandbox", "id", id, "dir", outDir)
+	return nil
+}
+
+// Destroy removes a sandbox and everything it created. Its logs are kept.
+func (mgr *Manager) Destroy(ctx context.Context, id string) error {
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
+	return mgr.destroy(ctx, id)
+}
+
+func (mgr *Manager) destroy(ctx context.Context, id string) error {
+	s, err := mgr.lookup(id)
+	if err != nil {
+		return err
+	}
 	s.proxy.Stop()
-	err := mgr.teardown(ctx, s.addr)
-	_ = mgr.sink.Close(s.rec.ID)
-	mgr.m.Forget(s.rec.ID)
-	delete(mgr.byID, s.rec.ID)
-	delete(mgr.byIndex, s.addr.Index)
-	if rerr := os.Remove(mgr.recordPath(s.rec.ID)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+	mgr.unregister(id, s.addr.Index)
+	err = mgr.teardown(ctx, id, s.addr)
+	_ = mgr.sink.Close(id)
+	mgr.m.Forget(id)
+	if rerr := os.Remove(mgr.recordPath(id)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 		err = errors.Join(err, rerr)
 	}
 	if err == nil {
-		mgr.log.Info("destroyed sandbox", "id", s.rec.ID)
+		mgr.log.Info("destroyed sandbox", "id", id)
 	}
 	return err
 }
 
-func (mgr *Manager) teardown(ctx context.Context, sb addressing.Sandbox) error {
+func (mgr *Manager) teardown(ctx context.Context, id string, sb addressing.Sandbox) error {
 	var errs []error
+	if err := mgr.vm(sb, id).Stop(); err != nil {
+		errs = append(errs, err)
+	}
 	if script, err := nft.RenderRemoveSandbox(sb.Index); err != nil {
 		errs = append(errs, err)
 	} else if err := nft.Apply(ctx, script); err != nil {
@@ -437,26 +626,32 @@ func (mgr *Manager) teardown(ctx context.Context, sb addressing.Sandbox) error {
 // Nuke stops every sandbox the daemon knows about and removes all egressd
 // state from the host, including leftovers it does not know about.
 func (mgr *Manager) Nuke(ctx context.Context) error {
+	mgr.opMu.Lock()
+	defer mgr.opMu.Unlock()
 	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	for _, s := range mgr.byID {
-		s.proxy.Stop()
-		_ = mgr.sink.Close(s.rec.ID)
-		mgr.m.Forget(s.rec.ID)
-	}
+	all := mgr.byID
 	mgr.byID = map[string]*sandbox{}
 	mgr.byIndex = map[int]*sandbox{}
-	return Cleanup(ctx, mgr.opts.StateDir)
+	mgr.mu.Unlock()
+	for id, s := range all {
+		s.proxy.Stop()
+		_ = mgr.sink.Close(id)
+		mgr.m.Forget(id)
+	}
+	return Cleanup(ctx, mgr.opts.StateDir, mgr.opts.FC.ChrootBase)
 }
 
-// Cleanup removes all egressd netns, veths, /etc/netns entries, the nft
-// table and persisted records, then restores host sysctls. It needs no
-// running daemon and is idempotent.
-func Cleanup(ctx context.Context, stateDir string) error {
+// Cleanup removes all egressd VMs and jails, netns, veths, IFBs,
+// /etc/netns entries, the nft table and persisted records, then restores
+// host sysctls. It needs no running daemon and is idempotent.
+func Cleanup(ctx context.Context, stateDir, chrootBase string) error {
 	if stateDir == "" {
 		stateDir = DefaultStateDir
 	}
 	var errs []error
+	if err := fc.CleanupJails(chrootBase); err != nil {
+		errs = append(errs, err)
+	}
 	left, err := netns.Leftovers()
 	if err != nil {
 		errs = append(errs, err)
@@ -478,24 +673,46 @@ func Cleanup(ctx context.Context, stateDir string) error {
 	return errors.Join(errs...)
 }
 
-// Get returns one sandbox.
-func (mgr *Manager) Get(id string) (Info, error) {
+func (mgr *Manager) lookup(id string) (*sandbox, error) {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 	s, ok := mgr.byID[id]
 	if !ok {
-		return Info{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
-	return mgr.infoLocked(s), nil
+	return s, nil
+}
+
+func (mgr *Manager) unregister(id string, k int) {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if s, ok := mgr.byID[id]; ok {
+		s.proxy.Stop()
+	}
+	delete(mgr.byID, id)
+	delete(mgr.byIndex, k)
+}
+
+// Get returns one sandbox.
+func (mgr *Manager) Get(id string) (Info, error) {
+	s, err := mgr.lookup(id)
+	if err != nil {
+		return Info{}, err
+	}
+	return mgr.info(s), nil
 }
 
 // List returns all sandboxes ordered by index.
 func (mgr *Manager) List() []Info {
 	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	out := make([]Info, 0, len(mgr.byID))
+	all := make([]*sandbox, 0, len(mgr.byID))
 	for _, s := range mgr.byID {
-		out = append(out, mgr.infoLocked(s))
+		all = append(all, s)
+	}
+	mgr.mu.Unlock()
+	out := make([]Info, 0, len(all))
+	for _, s := range all {
+		out = append(out, mgr.info(s))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
 	return out
@@ -527,9 +744,9 @@ func (mgr *Manager) Domain(k int, ip netip.Addr) string {
 // Sink exposes the event sink for collectors.
 func (mgr *Manager) Sink() *flowlog.Sink { return mgr.sink }
 
-// Close stops DNS listeners and closes logs. Sandboxes keep existing and
-// are restored by the next daemon start; without the proxy their DNS fails
-// closed.
+// Close stops DNS listeners and closes logs. Sandboxes, including running
+// VMs, keep existing and are restored by the next daemon start; without
+// the proxy their DNS fails closed.
 func (mgr *Manager) Close() {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
@@ -539,12 +756,23 @@ func (mgr *Manager) Close() {
 	mgr.sink.CloseAll()
 }
 
-func (mgr *Manager) infoLocked(s *sandbox) Info {
-	return Info{
-		ID: s.rec.ID, Index: s.addr.Index, Mode: s.rec.Mode, Netns: s.addr.Netns,
+func (mgr *Manager) info(s *sandbox) Info {
+	mgr.mu.Lock()
+	rec, pol := s.rec, s.policy
+	mgr.mu.Unlock()
+	info := Info{
+		ID: rec.ID, Index: s.addr.Index, Mode: rec.Mode, Netns: s.addr.Netns,
 		HostVeth: s.addr.HostVeth, HostAddr: s.addr.HostAddr.String(), NsAddr: s.addr.NsAddr.String(),
-		Created: s.rec.Created, Policy: s.policy, LogPath: flowlog.Path(mgr.opts.LogDir, s.rec.ID),
+		Created: rec.Created, Policy: pol, LogPath: flowlog.Path(mgr.opts.LogDir, rec.ID),
 	}
+	if rec.Mode == ModeVM {
+		vm := mgr.vm(s.addr, rec.ID)
+		info.VM = &VMInfo{
+			Running: vm.Alive(), GuestAddr: addressing.GuestAddr.String(),
+			JailRoot: vm.Root(), ConsoleLog: vm.ConsoleLog, ClonedFrom: rec.Snapshot,
+		}
+	}
+	return info
 }
 
 func (mgr *Manager) persist(rec Record) error {

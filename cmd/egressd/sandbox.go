@@ -37,26 +37,33 @@ func newSandboxCreateCmd(g *globalFlags) *cobra.Command {
 		Short: "Create a sandbox with its own netns and egress policy",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if vmConfig != "" {
-				return fmt.Errorf("--vm-config is not implemented yet (milestone M3)")
-			}
 			pol, err := os.ReadFile(policyPath)
 			if err != nil {
 				return err
 			}
+			req := api.CreateRequest{ID: args[0], Mode: mode, Policy: string(pol)}
+			if vmConfig != "" {
+				data, err := os.ReadFile(vmConfig)
+				if err != nil {
+					return err
+				}
+				req.VMConfig = string(data)
+			}
 			var info daemon.Info
-			err = api.NewClient(g.socket).Do(cmd.Context(), http.MethodPost, "/v1/sandboxes",
-				api.CreateRequest{ID: args[0], Mode: mode, Policy: string(pol)}, &info)
-			if err != nil {
+			if err := api.NewClient(g.socket).Do(cmd.Context(), http.MethodPost, "/v1/sandboxes", req, &info); err != nil {
 				return err
 			}
-			fmt.Printf("created %s (netns %s, %s via %s)\n", info.ID, info.Netns, info.NsAddr, info.HostAddr)
+			if info.VM != nil {
+				fmt.Printf("created %s (netns %s, guest %s, console %s)\n", info.ID, info.Netns, info.VM.GuestAddr, info.VM.ConsoleLog)
+			} else {
+				fmt.Printf("created %s (netns %s, %s via %s)\n", info.ID, info.Netns, info.NsAddr, info.HostAddr)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&policyPath, "policy", "", "policy YAML file")
 	cmd.Flags().StringVar(&mode, "mode", daemon.ModeExec, "exec or vm")
-	cmd.Flags().StringVar(&vmConfig, "vm-config", "", "Firecracker config (vm mode)")
+	cmd.Flags().StringVar(&vmConfig, "vm-config", "", "Firecracker config JSON without network-interfaces (vm mode)")
 	_ = cmd.MarkFlagRequired("policy")
 	return cmd
 }
@@ -130,9 +137,15 @@ func newSandboxListCmd(g *globalFlags) *cobra.Command {
 				return enc.Encode(infos)
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tMODE\tNETNS\tADDR\tDOMAINS\tCREATED")
+			fmt.Fprintln(tw, "ID\tMODE\tNETNS\tSTATE\tDOMAINS\tCREATED")
 			for _, i := range infos {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", i.ID, i.Mode, i.Netns, i.NsAddr,
+				state := "ready"
+				if i.VM != nil && !i.VM.Running {
+					state = "vm stopped"
+				} else if i.VM != nil {
+					state = "vm running"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", i.ID, i.Mode, i.Netns, state,
 					strings.Join(i.Policy.Egress.AllowDomains, ","), i.Created.Format("2006-01-02 15:04:05"))
 			}
 			return tw.Flush()

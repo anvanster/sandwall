@@ -97,3 +97,11 @@ func TestLogPrefixRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderVMNetns(t *testing.T) {
+	got, err := RenderVMNetns(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "vm-netns.nft", got)
+}

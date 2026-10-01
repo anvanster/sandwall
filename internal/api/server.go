@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/anvanster/egressd/internal/daemon"
 )
@@ -26,7 +27,7 @@ func NewHandler(mgr *daemon.Manager) http.Handler {
 		if !readJSON(w, r, &req) {
 			return
 		}
-		info, err := mgr.Create(r.Context(), req.ID, req.Mode, req.Policy)
+		info, err := mgr.Create(r.Context(), req.ID, req.Mode, req.Policy, req.VMConfig)
 		respond(w, http.StatusCreated, info, err)
 	})
 	mux.HandleFunc("GET /v1/sandboxes/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +45,36 @@ func NewHandler(mgr *daemon.Manager) http.Handler {
 		}
 		info, err := mgr.ApplyPolicy(r.Context(), r.PathValue("id"), req.Policy)
 		respond(w, http.StatusOK, info, err)
+	})
+	mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		var req SnapshotRequest
+		if !readJSON(w, r, &req) {
+			return
+		}
+		err := mgr.Snapshot(r.Context(), r.PathValue("id"), req.OutDir)
+		respond(w, http.StatusOK, map[string]string{"snapshot": req.OutDir}, err)
+	})
+	mux.HandleFunc("POST /v1/clones", func(w http.ResponseWriter, r *http.Request) {
+		var req CloneRequest
+		if !readJSON(w, r, &req) {
+			return
+		}
+		infos, err := mgr.Clone(r.Context(), req.SnapshotDir, req.Count, req.Prefix, req.Policy,
+			time.Duration(req.StaggerMs)*time.Millisecond)
+		if err != nil && len(infos) == 0 {
+			respond(w, 0, nil, err)
+			return
+		}
+		created, merr := json.Marshal(infos)
+		if merr != nil {
+			respond(w, 0, nil, merr)
+			return
+		}
+		resp := CloneResponse{Created: created}
+		if err != nil {
+			resp.Error = err.Error() // partial success: some clones exist
+		}
+		writeJSON(w, http.StatusCreated, resp)
 	})
 	mux.HandleFunc("POST /v1/nuke", func(w http.ResponseWriter, r *http.Request) {
 		err := mgr.Nuke(r.Context())

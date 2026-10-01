@@ -115,3 +115,52 @@ On the 10 MiB e2e download they come out 1.4 to 1.7% above the payload size.
 Denied traffic never becomes a confirmed conntrack flow, so there is no denied "flow" to count.
 This series counts logged deny events, which are de-duplicated per second, as an approximation of denied flow attempts.
 `egressd_denied_total{reason}` counts every dropped or rejected packet.
+
+## M3
+
+### VM-mode netns plumbing
+Inside a VM-mode netns, egressd owns `table ip egressd_vm`.
+Guest DNS to `172.16.0.1:53` is DNATed to `10.200.k.1:53`, and guest traffic leaving `veth-s<k>` is masqueraded to `10.200.k.2`.
+From then on the host enforces policy and attributes logs exactly as for exec mode.
+Two deviations from PRD §6:
+- **DNS DNAT is limited to destination `172.16.0.1`.** PRD §6 DNATs every port-53 packet. That would silently answer `dig @8.8.8.8` from the proxy, and the host would never see or log the bypass attempt. With the narrower DNAT, the M1 bypass check behaves the same from inside a guest.
+- **The forward policy is `drop`.** Only `172.16.0.2` may be forwarded out (no spoofing), and the guest cannot open connections to the netns itself.
+
+The host reaches a guest over SSH from inside its netns (the e2e harness's control channel).
+Replies come back through the `established` rule.
+
+### Jail layout and identity
+Each VM runs as `jailer --id egressd-sb<k> --netns /var/run/netns/sb<k>`, under uid/gid `100000+k`, in its own chroot under `--chroot-base` (default `/srv/jailer`).
+Every jail uses the same names: `vmlinux`, `drive-<id>`, `tap0`, guest MAC `06:00:AC:10:00:02` and guest IP `172.16.0.2`.
+So a snapshot from any sandbox restores unchanged in any other.
+`--vm-config` is a Firecracker config file without `network-interfaces`, which egressd owns.
+egressd rewrites paths to jail-relative names and appends `ipv6.disable=1 ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off` to the boot args.
+
+### Snapshots and clones
+`vm snapshot` pauses the VM, writes a full snapshot, copies the drives while still paused (so memory and disk agree), and resumes it.
+Clones hard-link the memory file (Firecracker maps it privately, so clones share clean pages) and get their own copy of each drive.
+The copy uses `cp --reflink=auto`, which is free on XFS or btrfs.
+Clones are restored paused, get their rate limiters from their own policy via `PATCH /network-interfaces`, and are then resumed.
+A restarted daemon adopts VMs that are still running and restarts dead ones from their original source (config or snapshot).
+
+### Firecracker rate limiter sizing
+The Firecracker token buckets refill every 1s and hold one second of traffic.
+With a 100ms bucket, a 10 Mbit cap measured 5 Mbit/s for a guest TCP upload.
+With 1s it measures 9 Mbit/s.
+The host `tbf` on the IFB still does the fine-grained shaping; the Firecracker limiter is a second, coarser boundary that holds even if host shaping is misconfigured.
+
+### `vm clone --stagger` and nested virtualization
+M3 was developed in a Lima VM (vz backend) with nested virtualization on Apple silicon.
+There, starting many KVM guests back to back (about 0.6s apart) left most of them with a vCPU spinning in the guest, unresponsive for minutes.
+The KVM counters showed constant exits but almost no WFI.
+This happened with freshly booted VMs as well as restored clones, and never with one VM, or with starts paced 1s apart (20 of 20 healthy, idle at ~0% CPU).
+egressd does not hide a delay for this.
+`vm clone --stagger <duration>` is an explicit option, also useful on bare metal to spread out the memory faulting of many clones.
+The M3 e2e test uses `--stagger 1s` (override with `CLONE_STAGGER`).
+On bare-metal KVM `--stagger 0` is expected to work, but this was not verified here.
+
+The same host limit applies to guests that are busy at the same time, not only to starts.
+With 20 clones fetching at once, or 20 simultaneous SSH handshakes into them, on a 10-CPU Lima VM, several guests stalled for minutes.
+So the M3 test keeps all 20 clones running simultaneously, but runs their allowlisted fetches concurrently in waves of `FETCH_CONCURRENCY` (default 8).
+It checks, from the host's conntrack timestamps, that the fetches within each wave overlapped.
+On bare metal, set `FETCH_CONCURRENCY=20` to fetch from all clones at once.

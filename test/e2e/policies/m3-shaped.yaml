@@ -1,0 +1,8 @@
+egress:
+  default: deny
+  allow_cidrs: [10.99.0.1]
+limits:
+  max_egress_bw: 10mbit
+  max_ingress_bw: 20mbit
+  max_conns: 64
+  new_conns_per_sec: 1000

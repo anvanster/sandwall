@@ -69,7 +69,7 @@ func newNukeCmd(g *globalFlags) *cobra.Command {
 				fmt.Fprintln(os.Stderr, "egressd: daemon nuke failed, cleaning up directly:", err)
 			}
 			// Always sweep directly too, so nuke works with a dead daemon.
-			if err := daemon.Cleanup(cmd.Context(), g.stateDir); err != nil {
+			if err := daemon.Cleanup(cmd.Context(), g.stateDir, g.chrootBase); err != nil {
 				return err
 			}
 			fmt.Println("nuked")

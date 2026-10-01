@@ -23,6 +23,30 @@ type CreateRequest struct {
 	ID     string `json:"id"`
 	Mode   string `json:"mode,omitempty"`
 	Policy string `json:"policy"`
+	// VMConfig is a Firecracker config JSON, for mode "vm".
+	VMConfig string `json:"vm_config,omitempty"`
+}
+
+// SnapshotRequest is the body of POST /v1/sandboxes/{id}/snapshot.
+type SnapshotRequest struct {
+	OutDir string `json:"out_dir"`
+}
+
+// CloneRequest is the body of POST /v1/clones.
+type CloneRequest struct {
+	SnapshotDir string `json:"snapshot_dir"`
+	Count       int    `json:"count"`
+	Prefix      string `json:"prefix,omitempty"`
+	Policy      string `json:"policy"`
+	// StaggerMs is the pause between VM starts.
+	StaggerMs int64 `json:"stagger_ms,omitempty"`
+}
+
+// CloneResponse lists the clones created (daemon.Info objects). Error is
+// set when only some of the requested clones could be created.
+type CloneResponse struct {
+	Created json.RawMessage `json:"created"`
+	Error   string          `json:"error,omitempty"`
 }
 
 // PolicyRequest is the body of PUT /v1/sandboxes/{id}/policy.

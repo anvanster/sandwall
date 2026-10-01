@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/anvanster/egressd/internal/api"
 	"github.com/anvanster/egressd/internal/daemon"
+	"github.com/anvanster/egressd/internal/fc"
 	"github.com/anvanster/egressd/internal/flowlog"
 	"github.com/anvanster/egressd/internal/metrics"
 )
@@ -25,6 +27,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 		metricsAddr string
 		upstream    string
 		exempt      []string
+		paths       fc.Paths
 	)
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -42,16 +45,32 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 				}
 				prefixes = append(prefixes, p.Masked())
 			}
-			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes)
+			paths.ChrootBase = g.chrootBase
+			for _, p := range []*string{&paths.Firecracker, &paths.Jailer} {
+				if *p == "" {
+					continue
+				}
+				abs, err := filepath.Abs(*p)
+				if err != nil {
+					return err
+				}
+				if _, err := os.Stat(abs); err != nil {
+					return err
+				}
+				*p = abs
+			}
+			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths)
 		},
 	}
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", ":9464", "Prometheus listen address (empty to disable)")
 	cmd.Flags().StringVar(&upstream, "upstream-dns", "", "default upstream resolver ip:port (default: first nameserver in /etc/resolv.conf)")
 	cmd.Flags().StringSliceVar(&exempt, "blocked-exempt", nil, "CIDRs to carve out of the blocked ranges (testing only)")
+	cmd.Flags().StringVar(&paths.Firecracker, "firecracker", "", "firecracker binary (enables vm mode)")
+	cmd.Flags().StringVar(&paths.Jailer, "jailer", "", "jailer binary (enables vm mode)")
 	return cmd
 }
 
-func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix) error {
+func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(exempt) > 0 {
 		log.Warn("blocked ranges have exemptions; do not use in production", "exempt", exempt)
@@ -62,6 +81,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		LogDir:          g.logDir,
 		BlockedExempt:   exempt,
 		DefaultUpstream: upstream,
+		FC:              paths,
 		Log:             log,
 		Metrics:         m,
 	})
