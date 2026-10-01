@@ -31,6 +31,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 		paths       fc.Paths
 		proxyURL    string
 		proxyEnv    bool
+		noProxy     string
 	)
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -66,7 +67,17 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up)
+			if !cmd.Flags().Changed("no-proxy") && proxyEnv {
+				noProxy = envFirst("no_proxy", "NO_PROXY")
+			}
+			if noProxy != "" && up == nil {
+				return errors.New("--no-proxy needs --upstream-proxy or --upstream-proxy-from-env")
+			}
+			np, notes, err := relay.ParseNoProxy(noProxy)
+			if err != nil {
+				return err
+			}
+			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes)
 		},
 	}
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", ":9464", "Prometheus listen address (empty to disable)")
@@ -75,7 +86,8 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().StringVar(&paths.Firecracker, "firecracker", "", "firecracker binary (enables vm mode)")
 	cmd.Flags().StringVar(&paths.Jailer, "jailer", "", "jailer binary (enables vm mode)")
 	cmd.Flags().StringVar(&proxyURL, "upstream-proxy", "", "carry allowed sandbox TCP through this HTTP proxy, http://[user:pass@]host:port")
-	cmd.Flags().BoolVar(&proxyEnv, "upstream-proxy-from-env", false, "take --upstream-proxy from https_proxy or http_proxy")
+	cmd.Flags().BoolVar(&proxyEnv, "upstream-proxy-from-env", false, "take --upstream-proxy from https_proxy or http_proxy, and --no-proxy from no_proxy")
+	cmd.Flags().StringVar(&noProxy, "no-proxy", "", "comma-separated names, IPv4 addresses and CIDRs that bypass the upstream proxy (no_proxy syntax)")
 	return cmd
 }
 
@@ -86,11 +98,7 @@ func upstreamProxy(raw string, fromEnv bool) (*relay.Upstream, error) {
 		if raw != "" {
 			return nil, errors.New("use either --upstream-proxy or --upstream-proxy-from-env")
 		}
-		for _, v := range []string{"https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"} {
-			if raw = os.Getenv(v); raw != "" {
-				break
-			}
-		}
+		raw = envFirst("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")
 		if raw == "" {
 			return nil, errors.New("--upstream-proxy-from-env: no https_proxy or http_proxy in the environment (sudo drops it unless preserved)")
 		}
@@ -101,15 +109,27 @@ func upstreamProxy(raw string, fromEnv bool) (*relay.Upstream, error) {
 	return relay.ParseUpstream(raw)
 }
 
-func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths, proxy *relay.Upstream) error {
+// envFirst returns the first non-empty environment variable of names.
+func envFirst(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths,
+	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(exempt) > 0 {
 		log.Warn("blocked ranges have exemptions; do not use in production", "exempt", exempt)
 	}
 	if proxy != nil {
-		log.Info("allowed sandbox TCP goes through the upstream proxy", "proxy", proxy.String())
-		if os.Getenv("no_proxy") != "" || os.Getenv("NO_PROXY") != "" {
-			log.Warn("no_proxy is not supported yet; every allowed destination goes through the proxy")
+		log.Info("allowed sandbox TCP goes through the upstream proxy", "proxy", proxy.String(),
+			"no_proxy_names", noProxy.Patterns, "no_proxy_cidrs", noProxy.CIDRs)
+		for _, n := range noProxyNotes {
+			log.Warn("no_proxy entry", "note", n)
 		}
 	}
 	m := metrics.New()
@@ -119,6 +139,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		BlockedExempt:   exempt,
 		DefaultUpstream: upstream,
 		UpstreamProxy:   proxy,
+		NoProxy:         noProxy,
 		FC:              paths,
 		Log:             log,
 		Metrics:         m,

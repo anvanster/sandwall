@@ -45,16 +45,20 @@ func fakeUpstream(t *testing.T) (addr string, queries *atomic.Int32) {
 type recorder struct {
 	mu      sync.Mutex
 	entries []nft.AllowEntry
+	direct  []nft.AllowEntry
 	fail    bool
 }
 
-func (r *recorder) insert(_ context.Context, k int, e []nft.AllowEntry) error {
+func (r *recorder) insert(_ context.Context, k int, e []nft.AllowEntry, direct bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fail {
 		return errors.New("nft unavailable")
 	}
 	r.entries = append(r.entries, e...)
+	if direct {
+		r.direct = append(r.direct, e...)
+	}
 	return nil
 }
 
@@ -186,7 +190,7 @@ func TestReloadRepopulatesOnlyStillAllowed(t *testing.T) {
 	}
 
 	var got []nft.AllowEntry
-	err := p.Reload(Settings{AllowDomains: []string{"github.com"}, QPS: 50, Upstream: up}, func(e []nft.AllowEntry) error {
+	err := p.Reload(Settings{AllowDomains: []string{"github.com"}, QPS: 50, Upstream: up}, func(e, _ []nft.AllowEntry) error {
 		got = e
 		return nil
 	})
@@ -197,7 +201,7 @@ func TestReloadRepopulatesOnlyStillAllowed(t *testing.T) {
 		t.Errorf("pypi.org addresses survived its removal: %v", got)
 	}
 
-	err = p.Reload(Settings{AllowDomains: []string{"*.org"}, QPS: 50, Upstream: up}, func(e []nft.AllowEntry) error {
+	err = p.Reload(Settings{AllowDomains: []string{"*.org"}, QPS: 50, Upstream: up}, func(e, _ []nft.AllowEntry) error {
 		got = e
 		return nil
 	})
@@ -209,5 +213,39 @@ func TestReloadRepopulatesOnlyStillAllowed(t *testing.T) {
 	}
 	if resp, _ := p.handle(query("github.com", dns.TypeA), "udp"); resp.Rcode != dns.RcodeRefused {
 		t.Error("reload did not swap the allowlist")
+	}
+}
+
+func TestDirectNamesFeedTheDirectSet(t *testing.T) {
+	up, _ := fakeUpstream(t)
+	p, rec := newTestProxy(t, Settings{
+		AllowDomains: []string{"pypi.org", "*.corp.example"}, QPS: 50, Upstream: up,
+		Direct: []string{"*.corp.example"},
+	})
+	for _, name := range []string{"pypi.org", "git.corp.example"} {
+		if resp, _ := p.handle(query(name, dns.TypeA), "udp"); resp.Rcode != dns.RcodeSuccess {
+			t.Fatalf("%s: rcode %d", name, resp.Rcode)
+		}
+	}
+	// The fake upstream answers every name with the same two addresses.
+	if len(rec.entries) != 4 || len(rec.direct) != 2 {
+		t.Fatalf("allow %v, direct %v", rec.entries, rec.direct)
+	}
+
+	var allowed, direct []nft.AllowEntry
+	reload := func(s Settings) {
+		t.Helper()
+		if err := p.Reload(s, func(a, d []nft.AllowEntry) error { allowed, direct = a, d; return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reload(Settings{AllowDomains: []string{"pypi.org", "*.corp.example"}, QPS: 50, Upstream: up, Direct: []string{"*.corp.example"}})
+	if len(allowed) != 2 || len(direct) != 2 {
+		t.Errorf("reload kept allow %v, direct %v", allowed, direct)
+	}
+	// A no_proxy name that is no longer allowlisted must not stay direct.
+	reload(Settings{AllowDomains: []string{"pypi.org"}, QPS: 50, Upstream: up, Direct: []string{"*.corp.example"}})
+	if len(allowed) != 2 || len(direct) != 0 {
+		t.Errorf("after removing the name: allow %v, direct %v", allowed, direct)
 	}
 }

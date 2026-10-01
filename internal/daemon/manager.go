@@ -68,6 +68,8 @@ type Options struct {
 	// UpstreamProxy, when set, carries every sandbox's allowed TCP through
 	// this HTTP proxy instead of forwarding it to the uplink.
 	UpstreamProxy *relay.Upstream
+	// NoProxy lists destinations that bypass UpstreamProxy.
+	NoProxy relay.NoProxy
 	// FC locates firecracker and jailer for VM mode. VM mode is unavailable
 	// when either binary is unset.
 	FC      fc.Paths
@@ -137,10 +139,13 @@ type Manager struct {
 	// opMu serializes lifecycle operations, which may take seconds (VM
 	// boot, image copies). mu only guards the maps, so log collectors'
 	// lookups never wait behind a lifecycle operation.
-	opMu    sync.Mutex
-	mu      sync.Mutex
-	byID    map[string]*sandbox
-	byIndex map[int]*sandbox
+	opMu sync.Mutex
+	mu   sync.Mutex
+	// resetDirect makes restore drop DNS-learned direct_<k> entries,
+	// because no_proxy changed since they were learned.
+	resetDirect bool
+	byID        map[string]*sandbox
+	byIndex     map[int]*sandbox
 }
 
 // New prepares the host (sysctls, base ruleset) and restores sandboxes
@@ -179,6 +184,11 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 	if err := mgr.ensureHost(ctx); err != nil {
 		return nil, err
 	}
+	changed, err := mgr.recordNoProxy()
+	if err != nil {
+		return nil, err
+	}
+	mgr.resetDirect = changed
 	if err := mgr.restore(ctx); err != nil {
 		return nil, err
 	}
@@ -201,6 +211,31 @@ func SystemResolver() (string, error) {
 
 func (mgr *Manager) recordsDir() string { return filepath.Join(mgr.opts.StateDir, "sandboxes") }
 func (mgr *Manager) sysctlFile() string { return filepath.Join(mgr.opts.StateDir, "sysctl-orig.json") }
+
+// recordNoProxy stores the effective no_proxy list and reports whether it
+// differs from the one the previous daemon run stored.
+func (mgr *Manager) recordNoProxy() (bool, error) {
+	var cur relay.NoProxy
+	if mgr.opts.UpstreamProxy != nil {
+		cur = mgr.opts.NoProxy
+	}
+	data, err := json.Marshal(cur)
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(mgr.opts.StateDir, "no-proxy.json")
+	prev, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if string(prev) == string(data) {
+		return false, nil
+	}
+	if err := os.MkdirAll(mgr.opts.StateDir, 0o700); err != nil {
+		return false, err
+	}
+	return true, os.WriteFile(path, data, 0o600)
+}
 func (mgr *Manager) recordPath(id string) string {
 	return filepath.Join(mgr.recordsDir(), id+".json")
 }
@@ -226,6 +261,7 @@ func (mgr *Manager) ensureHost(ctx context.Context) error {
 		BlockedRanges: nft.DefaultBlockedRanges,
 		BlockedExempt: mgr.opts.BlockedExempt,
 		Proxy:         mgr.opts.UpstreamProxy != nil,
+		DirectCIDRs:   mgr.opts.NoProxy.CIDRs,
 	})
 	if err := nft.Apply(ctx, base); err != nil {
 		return fmt.Errorf("base ruleset: %w", err)
@@ -406,7 +442,8 @@ func (mgr *Manager) allocIndex() (int, error) {
 }
 
 // setup brings every piece of a sandbox to the desired state and registers
-// it. It is idempotent; restoring keeps DNS-learned allow-set entries and
+// it. It is idempotent; restoring keeps DNS-learned allow-set entries (and
+// direct-set entries, unless no_proxy changed) and
 // adopts a VM that is still running. Runs with opMu held.
 func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, restoring bool) error {
 	sb, err := addressing.For(rec.Index)
@@ -437,7 +474,9 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 			return err
 		}
 	}
-	script, err := nft.RenderSandbox(mgr.sandboxRules(sb.Index, pol, nil, restoring))
+	rules := mgr.sandboxRules(sb.Index, pol, nil, nil, restoring)
+	rules.ResetDirect = restoring && mgr.resetDirect
+	script, err := nft.RenderSandbox(rules)
 	if err != nil {
 		return err
 	}
@@ -505,9 +544,10 @@ func (mgr *Manager) startVM(ctx context.Context, vm fc.VM, rec Record, pol *poli
 	return vm.Boot(ctx, cfg, vmLimits(pol))
 }
 
-func (mgr *Manager) sandboxRules(k int, pol *policy.Policy, allowed []nft.AllowEntry, preserve bool) nft.SandboxConfig {
+func (mgr *Manager) sandboxRules(k int, pol *policy.Policy, allowed, direct []nft.AllowEntry, preserve bool) nft.SandboxConfig {
 	return nft.SandboxConfig{
 		Proxied:         mgr.opts.UpstreamProxy != nil,
+		Direct:          direct,
 		Index:           k,
 		AllowCIDRs:      pol.Egress.AllowCIDRs,
 		MaxConns:        pol.Limits.MaxConns,
@@ -547,11 +587,15 @@ func (mgr *Manager) proxySettings(pol *policy.Policy) dnsproxy.Settings {
 	if up == "" {
 		up = mgr.opts.DefaultUpstream
 	}
-	return dnsproxy.Settings{AllowDomains: pol.Egress.AllowDomains, QPS: pol.Limits.DNSQPS, Upstream: up}
+	s := dnsproxy.Settings{AllowDomains: pol.Egress.AllowDomains, QPS: pol.Limits.DNSQPS, Upstream: up}
+	if mgr.opts.UpstreamProxy != nil {
+		s.Direct = mgr.opts.NoProxy.Patterns
+	}
+	return s
 }
 
-func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry) error {
-	return nft.Apply(ctx, nft.RenderAllow(k, entries))
+func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry, direct bool) error {
+	return nft.Apply(ctx, nft.RenderAllow(k, entries, direct))
 }
 
 // ApplyPolicy hot-reloads a sandbox's policy: the chain is re-rendered and
@@ -571,8 +615,8 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 	if err := mgr.ensureHost(ctx); err != nil {
 		return Info{}, err
 	}
-	err = s.proxy.Reload(mgr.proxySettings(pol), func(live []nft.AllowEntry) error {
-		script, err := nft.RenderSandbox(mgr.sandboxRules(s.addr.Index, pol, live, false))
+	err = s.proxy.Reload(mgr.proxySettings(pol), func(live, direct []nft.AllowEntry) error {
+		script, err := nft.RenderSandbox(mgr.sandboxRules(s.addr.Index, pol, live, direct, false))
 		if err != nil {
 			return err
 		}
@@ -580,7 +624,7 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 	})
 	if err != nil {
 		// Put the proxy back on the old policy; the nft transaction was atomic.
-		_ = s.proxy.Reload(mgr.proxySettings(s.policy), func([]nft.AllowEntry) error { return nil })
+		_ = s.proxy.Reload(mgr.proxySettings(s.policy), func(_, _ []nft.AllowEntry) error { return nil })
 		return Info{}, err
 	}
 	if s.relay != nil {

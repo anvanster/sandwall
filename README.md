@@ -104,18 +104,20 @@ Bandwidth limits are applied both by tc on the host and by Firecracker's own rat
 
 ### Behind an HTTP proxy
 
-On networks where only an HTTP proxy reaches the internet, start the daemon with `--upstream-proxy http://[user:pass@]host:port`, or `--upstream-proxy-from-env` to take it from `https_proxy`/`http_proxy` (`sudo` drops those unless preserved, e.g. `sudo --preserve-env=https_proxy,http_proxy`).
+On networks where only an HTTP proxy reaches the internet, start the daemon with `--upstream-proxy http://[user:pass@]host:port`, or `--upstream-proxy-from-env` to take it from `https_proxy`/`http_proxy` and `no_proxy` (`sudo` drops those unless preserved, e.g. `sudo --preserve-env=https_proxy,http_proxy,no_proxy`).
 The proxy is a next hop, not a destination: the sandbox needs no proxy settings and still connects to real addresses, and egressd still applies the policy to them.
 Allowed TCP is then redirected to a per-sandbox relay on `10.200.k.1:15001`, which tunnels it through the proxy:
 
 - TLS: `CONNECT <SNI>:<port>`. The SNI must be allowlisted (or the address inside `allow_cidrs`), otherwise the connection is reset and logged as `sni_mismatch`.
 - Plain HTTP: each request is forwarded in absolute form, and every request's `Host` is checked (`host_mismatch`, answered with 403).
 - Other TCP: `CONNECT` with the name the sandbox resolved for that address.
-- UDP to an allowed address is rejected (`no_proxy_route`), so HTTP/3 clients fall back to TCP.
+- UDP to an allowed address is rejected (`no_proxy_route`), so HTTP/3 clients fall back to TCP, unless the address is a `no_proxy` destination.
 
 The sandbox cannot reach the proxy itself, and proxy credentials never enter it.
 Connections through the relay end when the daemon stops, unlike forwarded flows.
-`no_proxy` is not supported yet: every allowed destination goes through the proxy.
+`--no-proxy` (or `no_proxy`) lists names, IPv4 addresses and CIDRs that bypass the proxy, with Go's `no_proxy` rules: `example.com` covers its subdomains too, `.example.com` only the subdomains, and ports are ignored.
+Allowed traffic to them, UDP included, is forwarded as without a proxy; the policy still applies first, so a `no_proxy` entry never allows anything.
+Names work through their DNS answers, so a `no_proxy` name that shares an address with other allowlisted names (a CDN, say) takes them direct too.
 
 ## Policy reference
 
@@ -151,7 +153,7 @@ Rule order for traffic leaving the host:
 8. Everything else is dropped (`not_allowed`).
 
 Traffic to the host itself is dropped (`host_access`), except DNS to the sandbox's own proxy.
-With an upstream proxy, step 7 accepts only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
+With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (forwarded directly) and otherwise only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
 
 ## Observability
 

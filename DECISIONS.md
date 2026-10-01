@@ -240,10 +240,22 @@ Proxy credentials (`Proxy-Authorization`) stay on the host.
 - Other TCP ports use CONNECT; a refusal is logged as `proxy_refused`.
 - An HTTP proxy cannot carry UDP. Allowed UDP from a proxied sandbox is rejected with `icmpx admin-prohibited` and logged as `no_proxy_route`, so HTTP/3 clients fall back to TCP at once instead of timing out.
 
-### `no_proxy` (not implemented yet)
-Destinations matching `no_proxy` would go out directly through the existing masquerade path.
-They would be kept in a per-sandbox set `direct_<k>`, filled from DNS answers for `no_proxy` names and from `no_proxy` CIDRs, which the redirect rule skips.
-Until then the daemon warns when `no_proxy` is set and sends every allowed destination through the proxy.
+### `no_proxy`
+Destinations matching `no_proxy` go out directly through the existing masquerade path, whatever the protocol.
+The policy is applied first, so `no_proxy` only changes the route of traffic that is already allowed.
+
+- Addresses and CIDRs go into a global set `direct_cidrs`, since `no_proxy` is a daemon setting.
+- For an allowlisted name that also matches `no_proxy`, the DNS proxy inserts its answers into a per-sandbox set `direct_<k>` as well as `allow_<k>`, in one transaction and with the same timeout. A policy reload repopulates `direct_<k>` from the DNS cache like `allow_<k>`, keeping only names that are still allowlisted.
+- `sb_<k>` accepts anything allowed whose destination is in either set before the TCP-only rules, and a per-sandbox nat chain `sbnat_<k>` (dispatched from `proxy_redirect` through `nat_vmap`) returns early for those destinations instead of redirecting. The redirect needs a per-sandbox chain because `direct_<k>` is per sandbox.
+
+Matching follows Go's `net/http` proxy rules: `example.com` matches the name and its subdomains, `.example.com` or `*.example.com` only subdomains.
+Unlike allowlist patterns, single-label suffixes such as `.corp` are accepted, because a `no_proxy` entry cannot widen access.
+Ports are ignored (`host:8080` applies to every port, which only widens the entry), IPv6 and unparsable entries are skipped with a warning, and a lone `*` is an error, as it would turn the proxy off.
+
+Like the allow set, the direct set is keyed by address: once a `no_proxy` name resolves to an address, every allowed connection to that address goes direct, including other allowlisted names served from it (and so without the relay's SNI/Host check).
+
+A restarted daemon keeps the DNS-learned `direct_<k>` entries, as it keeps `allow_<k>`, so clients with cached answers keep their direct route.
+If `no_proxy` changed since the previous run (the effective list is stored in the state directory as `no-proxy.json`), restore empties `direct_<k>` instead, so a removed entry cannot keep sending traffic direct until its timeout.
 
 ### DNS
 Where the site resolver answers external names, nothing changes: the DNS proxy's upstream queries are host traffic.
@@ -252,7 +264,7 @@ DNS still never carries a query for a name that is not allowlisted.
 
 ### Configuration
 The proxy is a property of the host network, so it is configured on the daemon, not in sandbox policies:
-`--upstream-proxy http://[user:pass@]proxy.example:3128`, or `--upstream-proxy-from-env` to read `https_proxy`, then `http_proxy`.
+`--upstream-proxy http://[user:pass@]proxy.example:3128` with `--no-proxy <list>`, or `--upstream-proxy-from-env` to read `https_proxy` (else `http_proxy`) and `no_proxy`.
 Only `http://` proxies are supported. The mode applies to every sandbox of the daemon; restarting the daemon with or without it re-renders every sandbox accordingly.
 
 ### Relayed connections end with the daemon
@@ -270,4 +282,5 @@ New connections work again as soon as the restarted daemon has rebound its relay
 `test/e2e/proxy.sh` runs a fake upstream proxy (`proxy.py`) in the `egattacker` netns that logs every request line.
 It checks that allowlisted HTTP arrives in absolute form and TLS as `CONNECT <name>:<port>`, both with egressd's credentials and never the sandbox's; that a non-allowlisted SNI or Host to an allowed address is refused and never reaches the proxy; that a sandbox using the proxy address as its own proxy only reaches the relay; that a proxy refusal is logged with its status; that the relay port, UDP, blocked and non-allowlisted destinations behave as designed; that a reload applies to new connections; and that the relay comes back after a daemon restart.
 With `REAL_PROXY` set it also fetches `https://pypi.org` through a real site proxy, on a host with no direct egress.
+Two more daemon runs check `no_proxy` by address and by name: the fetch reaches the origin without the proxy or the relay seeing it, allowed UDP is not rejected, and the direct set survives a restart with the same `no_proxy` but is reset when it changes.
 In the test the proxy shares the attacker address, which the test exempts from the blocked ranges; a real proxy on a private address stays blocked for sandboxes.

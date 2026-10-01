@@ -3,6 +3,8 @@ add set inet egressd blocked_ranges { type ipv4_addr; flags interval; auto-merge
 add set inet egressd blocked_exempt { type ipv4_addr; flags interval; auto-merge; }
 add map inet egressd pre_vmap { type ifname : verdict; }
 add map inet egressd in_vmap { type ifname : verdict; }
+add map inet egressd nat_vmap { type ifname : verdict; }
+add set inet egressd direct_cidrs { type ipv4_addr; flags interval; auto-merge; }
 add chain inet egressd conn_reject
 flush chain inet egressd conn_reject
 add rule inet egressd conn_reject meta l4proto tcp reject with tcp reset
@@ -11,6 +13,7 @@ flush set inet egressd blocked_ranges
 add element inet egressd blocked_ranges { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }
 flush set inet egressd blocked_exempt
 add element inet egressd blocked_exempt { 10.99.0.0/24 }
+flush set inet egressd direct_cidrs
 add chain inet egressd prerouting { type filter hook prerouting priority -150; policy accept; }
 flush chain inet egressd prerouting
 add rule inet egressd prerouting iifname "veth-h*" fib daddr type { local, broadcast, multicast } accept

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anvanster/egressd/internal/dnsproxy"
 	"github.com/anvanster/egressd/internal/flowlog"
 )
 
@@ -365,5 +366,41 @@ func TestReadClientHelloNotTLS(t *testing.T) {
 	_, consumed, err := readClientHello(strings.NewReader("\x16garbage that is not a TLS record at all"))
 	if !errors.Is(err, errNotHello) || len(consumed) == 0 {
 		t.Errorf("err %v, consumed %d", err, len(consumed))
+	}
+}
+
+func TestParseNoProxy(t *testing.T) {
+	np, notes, err := ParseNoProxy("localhost, 127.0.0.1,.corp.example,*.lab.example,git.example.org:8443,10.0.0.0/8 ::1,[fd00::1]:80,bad_name!,198.51.100.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPatterns := []string{"localhost", "*.localhost", "*.corp.example", "*.lab.example", "git.example.org", "*.git.example.org"}
+	if strings.Join(np.Patterns, " ") != strings.Join(wantPatterns, " ") {
+		t.Errorf("patterns %v, want %v", np.Patterns, wantPatterns)
+	}
+	var cidrs []string
+	for _, p := range np.CIDRs {
+		cidrs = append(cidrs, p.String())
+	}
+	if got := strings.Join(cidrs, " "); got != "127.0.0.1/32 10.0.0.0/8 198.51.100.7/32" {
+		t.Errorf("cidrs %s", got)
+	}
+	if len(notes) != 4 { // port ignored, two IPv6, one bad name
+		t.Errorf("notes %q", notes)
+	}
+	al := dnsproxy.NewAllowlist(np.Patterns)
+	for name, want := range map[string]bool{
+		"localhost": true, "corp.example": false, "a.corp.example": true,
+		"git.example.org": true, "x.git.example.org": true, "example.org": false,
+	} {
+		if al.Allows(name) != want {
+			t.Errorf("%s: matched %v, want %v", name, !want, want)
+		}
+	}
+	if _, _, err := ParseNoProxy("a.example, *"); err == nil {
+		t.Error("* accepted")
+	}
+	if np, _, err := ParseNoProxy(""); err != nil || !np.Empty() {
+		t.Errorf("empty: %+v %v", np, err)
 	}
 }

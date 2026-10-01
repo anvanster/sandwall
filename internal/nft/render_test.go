@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,12 +58,20 @@ func TestRenderSandbox(t *testing.T) {
 }
 
 func TestRenderBaseProxy(t *testing.T) {
-	golden(t, "base-proxy.nft", RenderBase(BaseConfig{BlockedRanges: DefaultBlockedRanges, Proxy: true}))
+	golden(t, "base-proxy.nft", RenderBase(BaseConfig{
+		BlockedRanges: DefaultBlockedRanges, Proxy: true,
+		DirectCIDRs: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
+	}))
 }
 
 func TestRenderSandboxProxied(t *testing.T) {
 	got, err := RenderSandbox(SandboxConfig{
 		Index: 7, AllowCIDRs: []string{"203.0.113.0/24"}, MaxConns: 64, NewConnsPerSec: 20, Proxied: true,
+		Allowed: []AllowEntry{
+			{Addr: netip.MustParseAddr("151.101.0.223"), Timeout: 300 * time.Second},
+			{Addr: netip.MustParseAddr("192.0.2.80"), Timeout: 60 * time.Second},
+		},
+		Direct: []AllowEntry{{Addr: netip.MustParseAddr("192.0.2.80"), Timeout: 60 * time.Second}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,13 +100,15 @@ func TestRenderRemoveSandbox(t *testing.T) {
 }
 
 func TestRenderAllow(t *testing.T) {
-	if RenderAllow(3, nil) != "" {
+	if RenderAllow(3, nil, true) != "" {
 		t.Error("empty allow should render nothing")
 	}
-	golden(t, "allow.nft", RenderAllow(3, []AllowEntry{
+	entries := []AllowEntry{
 		{Addr: netip.MustParseAddr("8.8.4.4"), Timeout: 90 * time.Second},
 		{Addr: netip.MustParseAddr("1.1.1.1"), Timeout: 500 * time.Millisecond},
-	}))
+	}
+	golden(t, "allow.nft", RenderAllow(3, entries, false))
+	golden(t, "allow-direct.nft", RenderAllow(3, entries, true))
 }
 
 func TestLogPrefixRoundTrip(t *testing.T) {
@@ -118,4 +129,20 @@ func TestRenderVMNetns(t *testing.T) {
 		t.Fatal(err)
 	}
 	golden(t, "vm-netns.nft", got)
+}
+
+func TestRenderSandboxPreserveAndResetDirect(t *testing.T) {
+	render := func(reset bool) string {
+		got, err := RenderSandbox(SandboxConfig{Index: 7, MaxConns: 1, NewConnsPerSec: 1, Proxied: true, PreserveAllowed: true, ResetDirect: reset})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if s := render(false); strings.Contains(s, "flush set inet egressd allow_7") || strings.Contains(s, "flush set inet egressd direct_7") {
+		t.Error("preserving restore flushed a DNS-learned set")
+	}
+	if s := render(true); strings.Contains(s, "flush set inet egressd allow_7") || !strings.Contains(s, "flush set inet egressd direct_7") {
+		t.Error("ResetDirect must flush direct_7 and only direct_7")
+	}
 }

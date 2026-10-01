@@ -3,6 +3,8 @@ add set inet egressd blocked_ranges { type ipv4_addr; flags interval; auto-merge
 add set inet egressd blocked_exempt { type ipv4_addr; flags interval; auto-merge; }
 add map inet egressd pre_vmap { type ifname : verdict; }
 add map inet egressd in_vmap { type ifname : verdict; }
+add map inet egressd nat_vmap { type ifname : verdict; }
+add set inet egressd direct_cidrs { type ipv4_addr; flags interval; auto-merge; }
 add chain inet egressd conn_reject
 flush chain inet egressd conn_reject
 add rule inet egressd conn_reject meta l4proto tcp reject with tcp reset
@@ -10,6 +12,8 @@ add rule inet egressd conn_reject reject with icmpx admin-prohibited
 flush set inet egressd blocked_ranges
 add element inet egressd blocked_ranges { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }
 flush set inet egressd blocked_exempt
+flush set inet egressd direct_cidrs
+add element inet egressd direct_cidrs { 198.51.100.0/24 }
 add chain inet egressd prerouting { type filter hook prerouting priority -150; policy accept; }
 flush chain inet egressd prerouting
 add rule inet egressd prerouting iifname "veth-h*" fib daddr type { local, broadcast, multicast } accept
@@ -17,7 +21,7 @@ add rule inet egressd prerouting iifname vmap @pre_vmap
 add rule inet egressd prerouting iifname "veth-h*" counter log group 1 prefix "egressd:0:unknown_iface " drop
 add chain inet egressd proxy_redirect { type nat hook prerouting priority dstnat; policy accept; }
 flush chain inet egressd proxy_redirect
-add rule inet egressd proxy_redirect iifname "veth-h*" meta l4proto tcp fib daddr type != local redirect to :15001
+add rule inet egressd proxy_redirect iifname vmap @nat_vmap
 add chain inet egressd forward { type filter hook forward priority filter; policy accept; }
 flush chain inet egressd forward
 add map inet egressd fwd_vmap { type ifname : verdict; }

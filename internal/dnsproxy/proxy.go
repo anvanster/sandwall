@@ -42,14 +42,18 @@ const (
 	VerdictError       = "error"
 )
 
-// Inserter adds DNS-learned addresses to allow_<k>.
-type Inserter func(ctx context.Context, k int, entries []nft.AllowEntry) error
+// Inserter adds DNS-learned addresses to allow_<k>, and with direct also to
+// direct_<k> (names matching the upstream proxy's no_proxy list).
+type Inserter func(ctx context.Context, k int, entries []nft.AllowEntry, direct bool) error
 
 // Settings are the policy-derived knobs that hot reload can change.
 type Settings struct {
 	AllowDomains []string // normalized patterns
 	QPS          int
 	Upstream     string // host:port
+	// Direct holds no_proxy name patterns (Allowlist syntax). Addresses of
+	// allowlisted names that also match bypass the upstream proxy.
+	Direct []string
 }
 
 // Config identifies the sandbox a proxy serves.
@@ -69,6 +73,7 @@ type Proxy struct {
 
 	mu          sync.RWMutex
 	allow       *Allowlist
+	direct      *Allowlist
 	upstream    string
 	limiter     *rate.Limiter
 	overLimitLg *rate.Limiter
@@ -93,6 +98,7 @@ func (p *Proxy) apply(s Settings) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.allow = NewAllowlist(s.AllowDomains)
+	p.direct = NewAllowlist(s.Direct)
 	p.upstream = s.Upstream
 	p.limiter = rate.NewLimiter(rate.Limit(qps), qps)
 }
@@ -126,24 +132,21 @@ func (p *Proxy) Stop() {
 }
 
 // Reload swaps in new settings and calls repopulate with every cached
-// address still allowed by the new allowlist. repopulate is expected to
-// flush and refill the allow set; no insert can interleave with it.
-func (p *Proxy) Reload(s Settings, repopulate func([]nft.AllowEntry) error) error {
+// address still allowed by the new allowlist, and the subset that bypasses
+// the upstream proxy. repopulate is expected to flush and refill the allow
+// and direct sets; no insert can interleave with it.
+func (p *Proxy) Reload(s Settings, repopulate func(allowed, direct []nft.AllowEntry) error) error {
 	p.setMu.Lock()
 	defer p.setMu.Unlock()
 	p.apply(s)
 	p.mu.RLock()
-	allow := p.allow
+	allow, direct := p.allow, p.direct
 	p.mu.RUnlock()
-	return repopulate(p.cache.live(allow, time.Now()))
-}
-
-// LiveAllowed returns cached addresses still allowed by the current policy.
-func (p *Proxy) LiveAllowed() []nft.AllowEntry {
-	p.mu.RLock()
-	allow := p.allow
-	p.mu.RUnlock()
-	return p.cache.live(allow, time.Now())
+	now := time.Now()
+	return repopulate(
+		p.cache.live(allow.Allows, now),
+		p.cache.live(func(n string) bool { return allow.Allows(n) && direct.Allows(n) }, now),
+	)
 }
 
 // Domain returns the most recent allowlisted name that resolved to ip.
@@ -185,7 +188,7 @@ func (p *Proxy) handle(r *dns.Msg, network string) (*dns.Msg, *flowlog.Event) {
 	}
 
 	p.mu.RLock()
-	allow, upstream, limiter := p.allow, p.upstream, p.limiter
+	allow, direct, upstream, limiter := p.allow, p.direct, p.upstream, p.limiter
 	p.mu.RUnlock()
 
 	if !limiter.Allow() {
@@ -225,7 +228,7 @@ func (p *Proxy) handle(r *dns.Msg, network string) (*dns.Msg, *flowlog.Event) {
 	}
 	entries := sanitize(resp)
 	ev.Answers = answerStrings(resp)
-	if err := p.insert(q.Name, entries); err != nil {
+	if err := p.insert(q.Name, entries, direct.Allows(q.Name)); err != nil {
 		ev.Verdict, ev.Reason = VerdictError, "allow set insert failed: "+err.Error()
 		return reply(r, dns.RcodeServerFailure), ev
 	}
@@ -256,7 +259,7 @@ func (p *Proxy) forward(r *dns.Msg, upstream, network string) (*dns.Msg, error) 
 	return resp, nil
 }
 
-func (p *Proxy) insert(qname string, entries []nft.AllowEntry) error {
+func (p *Proxy) insert(qname string, entries []nft.AllowEntry, direct bool) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -264,7 +267,7 @@ func (p *Proxy) insert(qname string, entries []nft.AllowEntry) error {
 	defer p.setMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), insertTimeout)
 	defer cancel()
-	if err := p.cfg.Insert(ctx, p.cfg.Index, entries); err != nil {
+	if err := p.cfg.Insert(ctx, p.cfg.Index, entries, direct); err != nil {
 		return err
 	}
 	p.cache.add(qname, entries, time.Now())
@@ -379,7 +382,9 @@ func (c *cache) gcLocked(now time.Time) {
 	}
 }
 
-func (c *cache) live(allow *Allowlist, now time.Time) []nft.AllowEntry {
+// live returns every cached address with an unexpired name that match
+// accepts, with the longest remaining lifetime among those names.
+func (c *cache) live(match func(string) bool, now time.Time) []nft.AllowEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gcLocked(now)
@@ -387,7 +392,7 @@ func (c *cache) live(allow *Allowlist, now time.Time) []nft.AllowEntry {
 	for ip, names := range c.byIP {
 		var best time.Time
 		for n, exp := range names {
-			if allow.Allows(n) && exp.After(best) {
+			if match(n) && exp.After(best) {
 				best = exp
 			}
 		}

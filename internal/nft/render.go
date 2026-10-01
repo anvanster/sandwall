@@ -5,17 +5,20 @@
 //
 //	table inet egressd
 //	  set blocked_ranges, blocked_exempt        (global, interval)
-//	  map pre_vmap, in_vmap                     (ifname -> jump sb_<k> / sbin_<k>)
+//	  set direct_cidrs                          (global, interval) no_proxy CIDRs
+//	  map pre_vmap, in_vmap, nat_vmap           (ifname -> jump sb_<k> / sbin_<k> / sbnat_<k>)
 //	  chain prerouting  (hook)  host-bound traffic to input; iifname vmap @pre_vmap; unknown veth-h* drop
-//	  chain proxy_redirect (hook, nat) with an upstream proxy: allowed TCP to the sandbox's relay
+//	  chain proxy_redirect (hook, nat) with an upstream proxy: iifname vmap @nat_vmap
 //	  chain forward     (hook)  nothing reaches a sandbox but replies
 //	  chain input       (hook)  iifname vmap @in_vmap;  unknown veth-h* drop
 //	  chain postrouting (hook)  masquerade sandbox traffic leaving the host
 //	  chain sb_<k>      per-sandbox egress policy
 //	  chain sbin_<k>    per-sandbox access to host-local addresses (DNS proxy only)
+//	  chain sbnat_<k>   with an upstream proxy: allowed TCP to the relay, except direct destinations
 //	  chain conn_reject shared reject for connection-limit overflows
 //	  set allow_<k>     DNS-learned IPs, per-element timeout
 //	  set allow_cidr_<k> static CIDRs from policy
+//	  set direct_<k>    DNS-learned IPs of no_proxy names, per-element timeout
 //
 // Every render is idempotent: it can be re-applied on top of any prior state,
 // including a partially created one.
@@ -82,6 +85,9 @@ type BaseConfig struct {
 	// Proxy redirects allowed sandbox TCP to the per-sandbox relay on
 	// addressing.RelayPort instead of forwarding it.
 	Proxy bool
+	// DirectCIDRs are no_proxy destinations: allowed traffic to them is
+	// forwarded as without a proxy.
+	DirectCIDRs []netip.Prefix
 }
 
 // SandboxConfig is the per-sandbox part of the ruleset.
@@ -96,8 +102,13 @@ type SandboxConfig struct {
 	// when a restarted daemon re-adopts a running sandbox.
 	PreserveAllowed bool
 	// Proxied matches BaseConfig.Proxy: allowed TCP goes to the relay, and
-	// other allowed traffic is rejected because the proxy cannot carry it.
+	// other allowed traffic is rejected because the proxy cannot carry it,
+	// except to no_proxy destinations (direct_<k>, direct_cidrs).
 	Proxied bool
+	// Direct repopulates direct_<k> after the flush on (re)apply, like
+	// Allowed; PreserveAllowed keeps it as is unless ResetDirect is set.
+	Direct      []AllowEntry
+	ResetDirect bool
 }
 
 // AllowEntry is one DNS-learned address and how long it stays allowed.
@@ -148,6 +159,8 @@ func (b *builder) declareBase() {
 	b.line("add set inet %s blocked_exempt { type ipv4_addr; flags interval; auto-merge; }", t)
 	b.line("add map inet %s pre_vmap { type ifname : verdict; }", t)
 	b.line("add map inet %s in_vmap { type ifname : verdict; }", t)
+	b.line("add map inet %s nat_vmap { type ifname : verdict; }", t)
+	b.line("add set inet %s direct_cidrs { type ipv4_addr; flags interval; auto-merge; }", t)
 	// TCP gets a reset: ICMP errors are rate-limited per destination by the
 	// kernel (net.ipv4.icmp_ratelimit), which turns most rejects of a
 	// connection burst into silent drops and client timeouts.
@@ -171,6 +184,10 @@ func RenderBase(cfg BaseConfig) string {
 	if len(cfg.BlockedExempt) > 0 {
 		b.line("add element inet %s blocked_exempt { %s }", t, joinPrefixes(cfg.BlockedExempt))
 	}
+	b.line("flush set inet %s direct_cidrs", t)
+	if cfg.Proxy && len(cfg.DirectCIDRs) > 0 {
+		b.line("add element inet %s direct_cidrs { %s }", t, joinPrefixes(cfg.DirectCIDRs))
+	}
 
 	// Sandbox policy runs in prerouting, not forward: a proxy redirect
 	// turns allowed traffic into input traffic, which forward never sees.
@@ -184,11 +201,8 @@ func RenderBase(cfg BaseConfig) string {
 	b.line("add chain inet %s proxy_redirect { type nat hook prerouting priority dstnat; policy accept; }", t)
 	b.line("flush chain inet %s proxy_redirect", t)
 	if cfg.Proxy {
-		// Only traffic sb_<k> accepted gets here. The redirect target is
-		// the incoming interface's address, 10.200.k.1, where sandbox k's
-		// relay listens.
-		b.line("add rule inet %s proxy_redirect iifname \"veth-h*\" meta l4proto tcp fib daddr type != local redirect to :%d",
-			t, addressing.RelayPort)
+		// Only traffic sb_<k> accepted gets here; sbnat_<k> redirects it.
+		b.line("add rule inet %s proxy_redirect iifname vmap @nat_vmap", t)
 	}
 
 	b.line("add chain inet %s forward { type filter hook forward priority filter; policy accept; }", t)
@@ -239,11 +253,20 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	b.line("flush chain inet %s sb_%d", t, k)
 	b.line("add chain inet %s sbin_%d", t, k)
 	b.line("flush chain inet %s sbin_%d", t, k)
+	b.line("add chain inet %s sbnat_%d", t, k)
+	b.line("flush chain inet %s sbnat_%d", t, k)
 	b.line("add set inet %s allow_%d { type ipv4_addr; flags timeout; }", t, k)
+	b.line("add set inet %s direct_%d { type ipv4_addr; flags timeout; }", t, k)
 	if !cfg.PreserveAllowed {
 		b.line("flush set inet %s allow_%d", t, k)
 		if len(cfg.Allowed) > 0 {
 			b.line("add element inet %s allow_%d { %s }", t, k, joinAllow(cfg.Allowed))
+		}
+	}
+	if !cfg.PreserveAllowed || cfg.ResetDirect {
+		b.line("flush set inet %s direct_%d", t, k)
+		if len(cfg.Direct) > 0 {
+			b.line("add element inet %s direct_%d { %s }", t, k, joinAllow(cfg.Direct))
 		}
 	}
 	b.line("add set inet %s allow_cidr_%d { type ipv4_addr; flags interval; auto-merge; }", t, k)
@@ -273,7 +296,14 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 		chain, cfg.MaxConns, LogGroup, LogPrefix(k, ReasonConnLimit))
 	// 7-8. Allowlist.
 	if cfg.Proxied {
-		// TCP goes on to the relay; an HTTP proxy cannot carry anything
+		// no_proxy destinations are forwarded as without a proxy (sbnat_<k>
+		// does not redirect them), whatever the protocol.
+		for _, direct := range []string{fmt.Sprintf("@direct_%d", k), "@direct_cidrs"} {
+			for _, set := range []string{"allow", "allow_cidr"} {
+				b.line("%s ip daddr %s ip daddr @%s_%d accept", chain, direct, set, k)
+			}
+		}
+		// Other TCP goes on to the relay; an HTTP proxy cannot carry anything
 		// else, so reject it at once (QUIC clients fall back to TCP).
 		for _, set := range []string{"allow", "allow_cidr"} {
 			b.line("%s ip daddr @%s_%d meta l4proto tcp accept", chain, set, k)
@@ -299,8 +329,18 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	}
 	b.line("%s %s", in, logDrop(k, ReasonHostAccess))
 
+	if cfg.Proxied {
+		// Runs only for traffic sb_<k> accepted. The redirect target is the
+		// incoming interface's address, 10.200.k.1, where the relay listens.
+		nat := fmt.Sprintf("add rule inet %s sbnat_%d", t, k)
+		b.line("%s ip daddr @direct_%d return", nat, k)
+		b.line("%s ip daddr @direct_cidrs return", nat)
+		b.line("%s meta l4proto tcp fib daddr type != local redirect to :%d", nat, addressing.RelayPort)
+	}
+
 	b.line("add element inet %s pre_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
 	b.line("add element inet %s in_vmap { %q : jump sbin_%d }", t, sb.HostVeth, k)
+	b.line("add element inet %s nat_vmap { %q : jump sbnat_%d }", t, sb.HostVeth, k)
 	return b.String(), nil
 }
 
@@ -317,34 +357,46 @@ func RenderRemoveSandbox(k int) (string, error) {
 	b.declareBase()
 	b.line("add chain inet %s sb_%d", t, k)
 	b.line("add chain inet %s sbin_%d", t, k)
+	b.line("add chain inet %s sbnat_%d", t, k)
 	b.line("add set inet %s allow_%d { type ipv4_addr; flags timeout; }", t, k)
 	b.line("add set inet %s allow_cidr_%d { type ipv4_addr; flags interval; auto-merge; }", t, k)
+	b.line("add set inet %s direct_%d { type ipv4_addr; flags timeout; }", t, k)
 	b.line("add element inet %s pre_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
 	b.line("add element inet %s in_vmap { %q : jump sbin_%d }", t, sb.HostVeth, k)
+	b.line("add element inet %s nat_vmap { %q : jump sbnat_%d }", t, sb.HostVeth, k)
 	b.line("delete element inet %s pre_vmap { %q }", t, sb.HostVeth)
 	b.line("delete element inet %s in_vmap { %q }", t, sb.HostVeth)
-	for _, c := range []string{"sb", "sbin"} {
+	b.line("delete element inet %s nat_vmap { %q }", t, sb.HostVeth)
+	for _, c := range []string{"sb", "sbin", "sbnat"} {
 		b.line("flush chain inet %s %s_%d", t, c, k)
 		b.line("delete chain inet %s %s_%d", t, c, k)
 	}
 	b.line("delete set inet %s allow_%d", t, k)
 	b.line("delete set inet %s allow_cidr_%d", t, k)
+	b.line("delete set inet %s direct_%d", t, k)
 	return b.String(), nil
 }
 
-// RenderAllow inserts or refreshes DNS-learned addresses in allow_<k>.
-// Re-adding an existing element does not extend its timeout, so each
-// address is added (ensuring it exists), deleted, and added again with the
-// new timeout, all in one atomic transaction.
-func RenderAllow(k int, entries []AllowEntry) string {
+// RenderAllow inserts or refreshes DNS-learned addresses in allow_<k>, and
+// with direct also in direct_<k>. Re-adding an existing element does not
+// extend its timeout, so each address is added (ensuring it exists),
+// deleted, and added again with the new timeout, all in one atomic
+// transaction.
+func RenderAllow(k int, entries []AllowEntry, direct bool) string {
 	if len(entries) == 0 {
 		return ""
 	}
 	var b builder
-	set := fmt.Sprintf("inet %s allow_%d", Table, k)
-	b.line("add element %s { %s }", set, joinAllow(entries))
-	b.line("delete element %s { %s }", set, joinAddrs(entries))
-	b.line("add element %s { %s }", set, joinAllow(entries))
+	sets := []string{"allow"}
+	if direct {
+		sets = append(sets, "direct")
+	}
+	for _, name := range sets {
+		set := fmt.Sprintf("inet %s %s_%d", Table, name, k)
+		b.line("add element %s { %s }", set, joinAllow(entries))
+		b.line("delete element %s { %s }", set, joinAddrs(entries))
+		b.line("add element %s { %s }", set, joinAllow(entries))
+	}
 	return b.String()
 }
 

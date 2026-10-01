@@ -79,6 +79,51 @@ start_daemon "${PROXY_FLAGS[@]}" || exit 1
 expect_eq "relay serves again after a daemon restart" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
 
+# count_events <sandbox> <jq boolean expr>: matching lines in the sandbox log.
+count_events() { jq -c "select($2)" "$LOGS/$1.jsonl" | wc -l; }
+k=$(sb_field t1 .index)
+direct_set() { nft -j list set inet egressd "direct_$k" | jq -r '[.nftables[].set.elem // empty | .[] | (.elem.val // .)] | join(" ")'; }
+
+# direct_ok <desc>: b.attacker.test fetched without the proxy or the relay
+# seeing it, and allowed UDP is not rejected as no_proxy_route.
+direct_ok() {
+	local plines relayed udp_rejects
+	plines=$(wc -l <"$PLOG")
+	relayed=$(count_events t1 '.type=="proxy"')
+	udp_rejects=$(count_events t1 '.reason=="no_proxy_route"')
+	expect_eq "$1: curl succeeds" \
+		"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
+	expect_eq "$1: the proxy saw nothing" "$(wc -l <"$PLOG")" "$plines"
+	expect_eq "$1: the relay saw nothing" "$(count_events t1 '.type=="proxy"')" "$relayed"
+	sbx t1 bash -c "echo x >/dev/udp/$A/9999"
+	sleep 1
+	expect_eq "$1: allowed UDP not rejected" "$(count_events t1 '.reason=="no_proxy_route"')" "$udp_rejects"
+}
+
+log "no_proxy by address"
+stop_daemon
+start_daemon "${PROXY_FLAGS[@]}" --no-proxy "$A" || exit 1
+expect_eq "address is in direct_cidrs" "$(nft -j list set inet egressd direct_cidrs | jq -r '.nftables[].set.elem // empty | .[]')" "$A"
+direct_ok "no_proxy address"
+
+log "no_proxy by name"
+stop_daemon
+start_daemon "${PROXY_FLAGS[@]}" --no-proxy ".attacker.test" || exit 1
+expect_eq "direct_cidrs emptied" "$(nft -j list set inet egressd direct_cidrs | jq -r '.nftables[].set.elem // empty | .[]')" ""
+expect_eq "b.attacker.test resolves" "$(dns_status t1 b.attacker.test)" NOERROR
+expect_eq "its address entered direct_$k" "$(direct_set)" "$A"
+direct_ok "no_proxy name"
+stop_daemon
+start_daemon "${PROXY_FLAGS[@]}" --no-proxy ".attacker.test" || exit 1
+expect_eq "direct_$k kept across a restart with the same no_proxy" "$(direct_set)" "$A"
+stop_daemon
+start_daemon "${PROXY_FLAGS[@]}" || exit 1
+expect_eq "direct_$k reset when no_proxy changes" "$(direct_set)" ""
+plines=$(wc -l <"$PLOG")
+expect_eq "without no_proxy, b.attacker.test goes through the proxy again" \
+	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
+expect_eq "the proxy saw it" "$(($(wc -l <"$PLOG") - plines))" 1
+
 if [[ -n "${REAL_PROXY:-}" ]]; then
 	log "real internet through the site proxy"
 	stop_daemon
