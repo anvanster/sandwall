@@ -1,0 +1,27 @@
+GO      ?= go
+BIN     := bin/egressd
+GOFLAGS ?=
+
+.PHONY: build test vet fmt-check e2e e2e-m1 clean
+
+build:
+	CGO_ENABLED=0 GOOS=linux $(GO) build $(GOFLAGS) -o $(BIN) ./cmd/egressd
+
+# Unit tests: policy parsing, allowlist matching, DNS proxy logic, golden rulesets.
+test:
+	$(GO) test ./internal/...
+
+vet:
+	GOOS=linux $(GO) vet ./...
+
+fmt-check:
+	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+# Root-only scenario tests from PRD §10. Run inside a disposable Linux VM.
+e2e: e2e-m1
+
+e2e-m1: build
+	sudo EGRESSD=$(CURDIR)/$(BIN) bash test/e2e/m1.sh
+
+clean:
+	rm -rf bin

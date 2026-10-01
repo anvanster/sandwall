@@ -1,0 +1,10 @@
+egress:
+  default: deny
+  allow_domains:
+    - example.com
+    - files.pythonhosted.org
+    - "*.files.pythonhosted.org"
+limits:
+  max_conns: 64
+  new_conns_per_sec: 20
+  dns_qps: 50

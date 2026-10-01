@@ -1,0 +1,10 @@
+egress:
+  default: deny
+  allow_domains:
+    - pypi.org
+    - files.pythonhosted.org
+    - "*.files.pythonhosted.org"   # random subdomains: e2e uplink-capture canary
+limits:
+  max_conns: 64
+  new_conns_per_sec: 20
+  dns_qps: 50

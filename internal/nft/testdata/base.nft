@@ -1,0 +1,22 @@
+add table inet egressd
+add set inet egressd blocked_ranges { type ipv4_addr; flags interval; auto-merge; }
+add set inet egressd blocked_exempt { type ipv4_addr; flags interval; auto-merge; }
+add map inet egressd fwd_vmap { type ifname : verdict; }
+add map inet egressd in_vmap { type ifname : verdict; }
+flush set inet egressd blocked_ranges
+add element inet egressd blocked_ranges { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }
+flush set inet egressd blocked_exempt
+add element inet egressd blocked_exempt { 10.99.0.0/24 }
+add chain inet egressd forward { type filter hook forward priority filter; policy accept; }
+flush chain inet egressd forward
+add rule inet egressd forward iifname vmap @fwd_vmap
+add rule inet egressd forward iifname "veth-h*" counter log group 1 prefix "egressd:0:unknown_iface " drop
+add rule inet egressd forward oifname "veth-h*" ct state established,related accept
+add rule inet egressd forward oifname "veth-h*" counter drop
+add chain inet egressd input { type filter hook input priority filter; policy accept; }
+flush chain inet egressd input
+add rule inet egressd input iifname vmap @in_vmap
+add rule inet egressd input iifname "veth-h*" counter log group 1 prefix "egressd:0:unknown_iface " drop
+add chain inet egressd postrouting { type nat hook postrouting priority srcnat; policy accept; }
+flush chain inet egressd postrouting
+add rule inet egressd postrouting ip saddr 10.200.0.0/16 oifname != "veth-h*" masquerade
