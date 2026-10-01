@@ -55,6 +55,9 @@ func (c *DenyCollector) Run(ctx context.Context) error {
 	nf, err := nflog.Open(&nflog.Config{
 		Group:    nft.LogGroup,
 		Copymode: nflog.CopyPacket,
+		// Deliver every message immediately; the kernel default batches up
+		// to 100 messages or 1s, which delays and reorders deny lines.
+		QThresh: 1,
 		// Headers are all we parse; cap the copy to keep messages small.
 		Bufsize: 128,
 	})

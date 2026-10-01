@@ -1,0 +1,14 @@
+# Clone demo policy: each clone may only reach the demo endpoint's zone.
+# upstream_dns points at the demo endpoint's nameserver so the demo needs no
+# internet; with a real resolver, drop it.
+egress:
+  default: deny
+  allow_domains:
+    - "*.attacker.test"
+upstream_dns: 10.99.0.1:5353
+limits:
+  max_egress_bw: 20mbit
+  max_ingress_bw: 100mbit
+  max_conns: 32
+  new_conns_per_sec: 10
+  dns_qps: 20

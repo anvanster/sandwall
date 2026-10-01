@@ -166,6 +166,9 @@ func RenderBase(cfg BaseConfig) string {
 
 	b.line("add chain inet %s input { type filter hook input priority filter; policy accept; }", t)
 	b.line("flush chain inet %s input", t)
+	// The host's own multicast/broadcast sent on veth-h<k> loops back as
+	// input on that interface; it is not sandbox traffic.
+	b.line("add rule inet %s input iifname \"veth-h*\" meta pkttype { broadcast, multicast } fib saddr type local accept", t)
 	b.line("add rule inet %s input iifname vmap @in_vmap", t)
 	b.line("add rule inet %s input iifname \"veth-h*\" %s", t, logDrop(0, ReasonUnknownIface))
 

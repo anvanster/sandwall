@@ -19,6 +19,7 @@ add rule inet egressd forward oifname "veth-h*" ct state established,related acc
 add rule inet egressd forward oifname "veth-h*" counter drop
 add chain inet egressd input { type filter hook input priority filter; policy accept; }
 flush chain inet egressd input
+add rule inet egressd input iifname "veth-h*" meta pkttype { broadcast, multicast } fib saddr type local accept
 add rule inet egressd input iifname vmap @in_vmap
 add rule inet egressd input iifname "veth-h*" counter log group 1 prefix "egressd:0:unknown_iface " drop
 add chain inet egressd postrouting { type nat hook postrouting priority srcnat; policy accept; }

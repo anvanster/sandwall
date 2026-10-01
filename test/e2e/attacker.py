@@ -9,7 +9,8 @@ HTTP on --port:
 Optional:
   --hold-port P     accept TCP connections and hold them open (conn limits)
   --dns-port P      answer UDP DNS for --dns-zone and its subdomains with
-                    --bind's address, NXDOMAIN for anything else
+                    --bind's address, NXDOMAIN for anything else; every
+                    query name is appended to --loot (DNS exfiltration evidence)
 
 Unlike `python3 -m http.server` it does no reverse DNS lookup at startup,
 which would hang in a netns without a resolver.
@@ -95,7 +96,7 @@ def hold_until_eof(conn):
         conn.close()
 
 
-def dns_server(addr, port, zone):
+def dns_server(addr, port, zone, loot_path):
     """Minimal UDP DNS responder: A records for zone and its subdomains."""
     zone = zone.lower().rstrip(".")
     ip = socket.inet_aton(addr)
@@ -119,6 +120,8 @@ def dns_server(addr, port, zone):
         qtype, qclass = struct.unpack("!HH", data[i : i + 4])
         question = data[12 : i + 4]
         name = ".".join(labels).lower()
+        with open(loot_path, "a") as f:
+            f.write("dns query: %s\n" % name)
         in_zone = name == zone or name.endswith("." + zone)
         answer = b""
         rcode = 0 if in_zone else 3
@@ -142,7 +145,7 @@ def main():
     if args.hold_port:
         threading.Thread(target=hold_server, args=(args.bind, args.hold_port), daemon=True).start()
     if args.dns_port:
-        threading.Thread(target=dns_server, args=(args.bind, args.dns_port, args.dns_zone), daemon=True).start()
+        threading.Thread(target=dns_server, args=(args.bind, args.dns_port, args.dns_zone, args.loot), daemon=True).start()
     with Server((args.bind, args.port), Handler) as srv:
         print("listening on %s:%d" % (args.bind, args.port), flush=True)
         srv.serve_forever()

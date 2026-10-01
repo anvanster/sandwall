@@ -1,0 +1,15 @@
+# What a Python coding agent legitimately needs.
+egress:
+  default: deny
+  allow_domains:
+    - pypi.org
+    - files.pythonhosted.org
+    - github.com
+    - "*.githubusercontent.com"
+  allow_cidrs: []
+limits:
+  max_egress_bw: 50mbit
+  max_ingress_bw: 200mbit
+  max_conns: 64
+  new_conns_per_sec: 20
+  dns_qps: 50
