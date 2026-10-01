@@ -3,6 +3,7 @@ package policy
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const fullExample = `
@@ -87,6 +88,49 @@ func TestParseBandwidth(t *testing.T) {
 		got, err := ParseBandwidth(in)
 		if err != nil || got != want {
 			t.Errorf("ParseBandwidth(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+}
+
+func TestQuarantineTriggers(t *testing.T) {
+	p, err := Parse([]byte(`
+egress: {allow_domains: [pypi.org]}
+quarantine:
+  freeze: true
+  triggers:
+    - {reasons: [DNS_Bypass, sni_mismatch, dns_bypass], count: 3, window: 60s}
+    - {reasons: [dns_refused], count: 20, window: 5m}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := p.Quarantine
+	if q == nil || !q.Freeze || len(q.Triggers) != 2 {
+		t.Fatalf("%+v", q)
+	}
+	if got := strings.Join(q.Triggers[0].Reasons, ","); got != "dns_bypass,sni_mismatch" {
+		t.Errorf("reasons not normalized: %s", got)
+	}
+	if q.Triggers[0].Window != "1m0s" || q.Triggers[1].WindowDuration() != 5*time.Minute {
+		t.Errorf("windows %q %v", q.Triggers[0].Window, q.Triggers[1].WindowDuration())
+	}
+	if p, err := Parse([]byte("egress: {allow_domains: [pypi.org]}\n")); err != nil || p.Quarantine != nil {
+		t.Errorf("no quarantine block: %+v %v", p.Quarantine, err)
+	}
+
+	for name, bad := range map[string]string{
+		"no triggers":    `quarantine: {freeze: true}`,
+		"empty reasons":  `quarantine: {triggers: [{reasons: [], count: 1, window: 1s}]}`,
+		"unknown reason": `quarantine: {triggers: [{reasons: [quarantined], count: 1, window: 1s}]}`,
+		"zero count":     `quarantine: {triggers: [{reasons: [dns_bypass], count: 0, window: 1s}]}`,
+		"huge count":     `quarantine: {triggers: [{reasons: [dns_bypass], count: 10001, window: 1s}]}`,
+		"bad window":     `quarantine: {triggers: [{reasons: [dns_bypass], count: 1, window: soon}]}`,
+		"short window":   `quarantine: {triggers: [{reasons: [dns_bypass], count: 1, window: 10ms}]}`,
+		"long window":    `quarantine: {triggers: [{reasons: [dns_bypass], count: 1, window: 48h}]}`,
+		"unknown field":  `quarantine: {triggers: [{reasons: [dns_bypass], count: 1, window: 1s, action: kill}]}`,
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

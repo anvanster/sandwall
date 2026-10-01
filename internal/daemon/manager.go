@@ -32,6 +32,7 @@ import (
 	"github.com/anvanster/sandwall/internal/policy"
 	"github.com/anvanster/sandwall/internal/relay"
 	"github.com/anvanster/sandwall/internal/shaper"
+	"github.com/anvanster/sandwall/internal/watchdog"
 )
 
 // Sandbox modes.
@@ -152,6 +153,7 @@ type Manager struct {
 	log  *slog.Logger
 	sink *flowlog.Sink
 	m    *metrics.Metrics
+	wd   *watchdog.Watchdog
 
 	// opMu serializes lifecycle operations, which may take seconds (VM
 	// boot, image copies). mu only guards the maps, so log collectors'
@@ -198,6 +200,8 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 		opts: opts, log: opts.Log, sink: sink, m: opts.Metrics,
 		byID: map[string]*sandbox{}, byIndex: map[int]*sandbox{},
 	}
+	mgr.wd = watchdog.New(mgr.autoQuarantine)
+	sink.SetObserver(mgr.wd.Observe)
 	if err := mgr.ensureHost(ctx); err != nil {
 		return nil, err
 	}
@@ -549,6 +553,7 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 	if rec.Quarantine != nil {
 		mgr.m.Quarantined.WithLabelValues(rec.ID).Set(1)
 	}
+	mgr.wd.Set(rec.ID, pol.Quarantine, rec.Quarantine == nil)
 
 	// The VM starts last: its DNS and policy are in place before it boots.
 	if rec.Mode == ModeVM && !(restoring && vm.Alive()) {
@@ -686,6 +691,7 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 	mgr.mu.Lock()
 	s.rec, s.policy = rec, pol
 	mgr.mu.Unlock()
+	mgr.wd.Set(id, pol.Quarantine, rec.Quarantine == nil)
 	mgr.log.Info("applied policy", "id", id)
 	return mgr.Get(id)
 }
@@ -777,6 +783,7 @@ func (mgr *Manager) Quarantine(ctx context.Context, id, reason string, freeze bo
 	s.rec = rec
 	mgr.mu.Unlock()
 	mgr.m.Quarantined.WithLabelValues(id).Set(1)
+	mgr.wd.Set(id, s.policy.Quarantine, false)
 	mgr.sink.Write(flowlog.Event{Type: flowlog.TypeQuarantine, SandboxID: id, Verdict: "quarantined", Reason: q.Reason})
 	mgr.log.Warn("quarantined sandbox", "id", id, "reason", q.Reason, "frozen", q.Frozen, "flows_killed", killed)
 	info, err := mgr.Get(id)
@@ -827,10 +834,28 @@ func (mgr *Manager) Release(ctx context.Context, id string) (Info, error) {
 	s.rec = rec
 	mgr.mu.Unlock()
 	mgr.m.Quarantined.WithLabelValues(id).Set(0)
+	mgr.wd.Set(id, s.policy.Quarantine, true)
 	mgr.sink.Write(flowlog.Event{Type: flowlog.TypeQuarantine, SandboxID: id, Verdict: "released", Reason: q.Reason})
 	mgr.log.Info("released sandbox", "id", id)
 	info, err := mgr.Get(id)
 	return info, errors.Join(append(errs, err)...)
+}
+
+// autoQuarantineTimeout bounds one automatic quarantine.
+const autoQuarantineTimeout = time.Minute
+
+// autoQuarantine is the watchdog's Fire: a policy trigger fired.
+func (mgr *Manager) autoQuarantine(id, reason string, freeze bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), autoQuarantineTimeout)
+	defer cancel()
+	mgr.log.Warn("quarantine trigger fired", "id", id, "reason", reason)
+	if _, err := mgr.Quarantine(ctx, id, reason, freeze); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return // destroyed meanwhile
+		}
+		mgr.log.Error("automatic quarantine", "id", id, "err", err)
+	}
+	mgr.m.AutoQuarantines.WithLabelValues(id).Inc()
 }
 
 func (mgr *Manager) freeze(ctx context.Context, s *sandbox) error {
@@ -910,6 +935,7 @@ func (mgr *Manager) Nuke(ctx context.Context) error {
 	mgr.mu.Unlock()
 	for id, s := range all {
 		s.stop()
+		mgr.wd.Remove(id)
 		_ = mgr.sink.Close(id)
 		mgr.m.Forget(id)
 	}
@@ -964,6 +990,7 @@ func (mgr *Manager) unregister(id string, k int) {
 	if s, ok := mgr.byID[id]; ok {
 		s.stop()
 	}
+	mgr.wd.Remove(id)
 	delete(mgr.byID, id)
 	delete(mgr.byIndex, k)
 }

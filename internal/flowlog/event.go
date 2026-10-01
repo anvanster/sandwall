@@ -77,9 +77,18 @@ func Path(dir, sandboxID string) string {
 
 // Sink fans events out to one append-only file per sandbox.
 type Sink struct {
-	dir   string
-	mu    sync.Mutex
-	files map[string]*os.File
+	dir      string
+	mu       sync.Mutex
+	files    map[string]*os.File
+	observer func(Event)
+}
+
+// SetObserver registers fn to see every event written to an open sandbox
+// log, after it is written. fn must not block.
+func (s *Sink) SetObserver(fn func(Event)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observer = fn
 }
 
 // NewSink creates the log directory if needed.
@@ -128,10 +137,15 @@ func (s *Sink) Write(e Event) {
 	}
 	line = append(line, '\n')
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if f, ok := s.files[e.SandboxID]; ok {
+	f, ok := s.files[e.SandboxID]
+	if ok {
 		// One write per line on an O_APPEND file keeps lines intact.
 		_, _ = f.Write(line)
+	}
+	obs := s.observer
+	s.mu.Unlock()
+	if ok && obs != nil {
+		obs(e)
 	}
 }
 

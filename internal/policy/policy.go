@@ -8,8 +8,10 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,7 +30,50 @@ type Policy struct {
 	Egress      Egress `yaml:"egress" json:"egress"`
 	Limits      Limits `yaml:"limits" json:"limits"`
 	UpstreamDNS string `yaml:"upstream_dns,omitempty" json:"upstream_dns,omitempty"`
+	// Quarantine configures automatic quarantine; nil means none.
+	Quarantine *Quarantine `yaml:"quarantine,omitempty" json:"quarantine,omitempty"`
 }
+
+// Quarantine quarantines the sandbox automatically when any trigger fires.
+type Quarantine struct {
+	// Freeze also stops the sandbox's processes or pauses its VM.
+	Freeze   bool      `yaml:"freeze,omitempty" json:"freeze,omitempty"`
+	Triggers []Trigger `yaml:"triggers" json:"triggers"`
+}
+
+// Trigger fires when Count events with any of Reasons are logged within
+// Window.
+type Trigger struct {
+	Reasons []string `yaml:"reasons" json:"reasons"`
+	Count   int      `yaml:"count" json:"count"`
+	Window  string   `yaml:"window" json:"window"` // Go duration, e.g. "60s"
+}
+
+// WindowDuration returns the parsed window.
+func (t Trigger) WindowDuration() time.Duration {
+	d, _ := time.ParseDuration(t.Window)
+	return d
+}
+
+// TriggerReasons are the event reasons a trigger can count: deny reasons
+// from the firewall, refusals by the relay, and DNS refusals.
+var TriggerReasons = []string{
+	// firewall (deny events)
+	"dns_bypass", "blocked_range", "not_allowed", "host_access", "rate_limit",
+	"conn_limit", "ipv6", "quic_blocked", "no_proxy_route",
+	// relay (relay events with verdict deny)
+	"sni_mismatch", "host_mismatch", "bad_client_hello", "proxy_refused",
+	// DNS proxy: a name that is not allowlisted, and the query rate limit
+	"dns_refused", "dns_ratelimited",
+}
+
+// Bounds on triggers, so a policy cannot make the daemon keep unbounded
+// history.
+const (
+	MaxTriggerCount  = 10000
+	MinTriggerWindow = time.Second
+	MaxTriggerWindow = 24 * time.Hour
+)
 
 // Egress holds the allowlist.
 type Egress struct {
@@ -140,6 +185,42 @@ func (p *Policy) normalize() error {
 			errs = append(errs, fmt.Errorf("upstream_dns: %w", err))
 		} else {
 			p.UpstreamDNS = up
+		}
+	}
+
+	if q := p.Quarantine; q != nil {
+		if len(q.Triggers) == 0 {
+			errs = append(errs, errors.New("quarantine: needs at least one trigger"))
+		}
+		for i := range q.Triggers {
+			t := &q.Triggers[i]
+			where := fmt.Sprintf("quarantine.triggers[%d]", i)
+			if len(t.Reasons) == 0 {
+				errs = append(errs, fmt.Errorf("%s.reasons: needs at least one reason", where))
+			}
+			var reasons []string
+			for _, r := range t.Reasons {
+				r = strings.ToLower(strings.TrimSpace(r))
+				switch {
+				case !slices.Contains(TriggerReasons, r):
+					errs = append(errs, fmt.Errorf("%s.reasons: unknown reason %q (one of %s)", where, r, strings.Join(TriggerReasons, ", ")))
+				case !slices.Contains(reasons, r):
+					reasons = append(reasons, r)
+				}
+			}
+			t.Reasons = reasons
+			if t.Count < 1 || t.Count > MaxTriggerCount {
+				errs = append(errs, fmt.Errorf("%s.count: must be between 1 and %d, got %d", where, MaxTriggerCount, t.Count))
+			}
+			d, err := time.ParseDuration(t.Window)
+			switch {
+			case err != nil:
+				errs = append(errs, fmt.Errorf("%s.window: %q is not a duration such as \"60s\" or \"5m\"", where, t.Window))
+			case d < MinTriggerWindow || d > MaxTriggerWindow:
+				errs = append(errs, fmt.Errorf("%s.window: must be between %s and %s, got %s", where, MinTriggerWindow, MaxTriggerWindow, d))
+			default:
+				t.Window = d.String()
+			}
 		}
 	}
 

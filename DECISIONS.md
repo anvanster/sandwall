@@ -369,10 +369,23 @@ The quarantine (time, reason, frozen) is stored in the sandbox record, so a rest
 `test/e2e/quarantine.sh` cuts a forwarded and a relayed download in flight (the sandbox has a 2 Mbit ingress cap, so data is still on the wire when the cut happens; with only a client-side `--limit-rate`, a local endpoint fills the client's socket buffer within the first two seconds), and checks the logged flow bytes, refused and unforwarded DNS, dropped TCP and UDP, quarantine across `policy apply` and a daemon restart, freezing, release, and destroy while frozen.
 M3 checks that a quarantined guest is cut off and that `--freeze` pauses and `release` resumes the VM.
 
+### Automatic quarantine
+Triggers live in the sandbox policy, not in daemon flags: what is suspicious depends on the workload, and `policy apply` changes them like any other part of the policy.
+They are opt-in, because a quarantine stops the sandbox's work and an unexpected one is an outage.
+
+The daemon's event sink passes every event written to a sandbox log to a watchdog, which maps it to a trigger reason (firewall deny reasons, relay refusals, and `dns_refused` / `dns_ratelimited` for DNS) and keeps, per trigger, the times of the last `count` matching events.
+When `count` of them fall within `window`, the trigger fires once and calls the same `Quarantine` as the CLI, with a reason naming the trigger and the last event.
+The watchdog is disarmed while the sandbox is quarantined and re-armed with empty counts on release or policy apply.
+
+Counting logged events rather than packets is deliberate.
+The deny log already collapses identical drops to one per second, so a single blocked connection's retransmits count once, and a trigger counts attempts.
+`count` is capped at 10000 and `window` at 24h, so a policy cannot make the daemon keep unbounded history; events of a quarantined sandbox, its own `quarantined` drops and DNS refusals, never count.
+The policy accepts only reasons something produces; a unit test keeps that list in step with the firewall, relay and DNS constants.
+A daemon restart resets the counts, which only delays a trigger.
+
 ## Name
 
 The project was developed as `egressd` and renamed to `sandwall` before its first release.
 An earlier, unrelated project, castai/egressd (Kubernetes-aware network traffic monitoring, archived in 2026), works in the same space of Linux egress traffic, conntrack and Prometheus metrics under that name.
 Everything was renamed at once without compatibility shims: binary, Go module, nftables tables (`inet sandwall`, `ip sandwall_vm`), log prefixes, metrics (`sandwall_*`), jail ids, and the default state, log, socket and asset paths.
 A host that ran the old binary needs one `egressd nuke` before switching, since `sandwall nuke` does not know the old names.
-

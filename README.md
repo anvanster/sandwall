@@ -145,6 +145,15 @@ limits:
   new_conns_per_sec: 20          # default 20
   dns_qps: 50                    # DNS queries per second (default 50)
 upstream_dns: 1.1.1.1:53         # optional; default is the host's first resolver
+quarantine:                      # optional: quarantine automatically (see Quarantine)
+  freeze: true                   # also stop the processes or pause the VM
+  triggers:                      # any one firing quarantines the sandbox
+    - reasons: [dns_bypass, sni_mismatch, host_mismatch]
+      count: 3                   # 3 such events ...
+      window: 60s                # ... within 60s
+    - reasons: [dns_refused]     # lookups of names that are not allowlisted
+      count: 20
+      window: 60s
 ```
 
 Unknown keys are rejected, so a typo fails loudly instead of silently allowing nothing or everything.
@@ -184,6 +193,22 @@ The quarantine is persisted and survives a daemon restart, and `policy apply` do
 `release` restores the policy with empty allow sets, so names must be resolved again, and thaws a frozen sandbox.
 `destroy` works on a quarantined sandbox as usual.
 
+### Automatic quarantine
+
+A policy's `quarantine.triggers` quarantine the sandbox without an operator: when `count` events with any of a trigger's `reasons` are logged within `window`, the daemon quarantines it, freezing it too if `freeze` is set.
+The quarantine event's reason says which trigger fired and the last event that counted, e.g. `auto: 3 x dns_bypass|sni_mismatch within 1m0s (last: dns_bypass 1.0.0.1:53)`.
+
+Reasons a trigger can count:
+
+- firewall denies: `dns_bypass`, `blocked_range`, `not_allowed`, `host_access`, `rate_limit`, `conn_limit`, `ipv6`, `quic_blocked`, `no_proxy_route`;
+- relay refusals: `sni_mismatch`, `host_mismatch`, `bad_client_hello`, `proxy_refused`;
+- DNS: `dns_refused` (a name that is not allowlisted) and `dns_ratelimited` (over `dns_qps`).
+
+Events are counted as logged, so identical denied packets (same reason, protocol, destination and port) count at most once per second: counts measure attempts, not retransmits.
+A trigger fires once; a release re-arms the triggers with counts from zero, and so does `policy apply`.
+Triggers are off unless the policy has a `quarantine` block.
+`dns_bypass`, `sni_mismatch` and `host_mismatch` rarely come from well-behaved software, so low counts suit them; `not_allowed` and `dns_refused` also come from ordinary misconfiguration, such as a missing allowlist entry, and want higher counts.
+
 ## Observability
 
 Each sandbox has a JSONL log at `/var/log/sandwall/<id>.jsonl`; `sandwall logs <id> [-f] [--deny-only]` prints it.
@@ -211,6 +236,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 | `sandwall_denied_total` | `reason` |
 | `sandwall_relay_connections_total` | `result` (`ok`, `denied`, `refused`, `error`) |
 | `sandwall_quarantined` (gauge) | |
+| `sandwall_auto_quarantines_total` | |
 
 ## Threat model
 

@@ -1,0 +1,9 @@
+egress:
+  default: deny
+  allow_domains: ["*.attacker.test"]
+upstream_dns: 10.99.0.1:5353
+quarantine:
+  triggers:
+    - reasons: [dns_bypass, sni_mismatch]
+      count: 3
+      window: 30s

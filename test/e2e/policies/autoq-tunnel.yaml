@@ -1,0 +1,10 @@
+egress:
+  default: deny
+  allow_domains: ["*.attacker.test"]
+upstream_dns: 10.99.0.1:5353
+quarantine:
+  freeze: true
+  triggers:
+    - reasons: [dns_refused]
+      count: 5
+      window: 30s

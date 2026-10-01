@@ -22,6 +22,8 @@ type Metrics struct {
 	RelayConnections *prometheus.CounterVec
 	// Quarantined is 1 while a sandbox is quarantined.
 	Quarantined *prometheus.GaugeVec
+	// AutoQuarantines counts quarantines started by a policy trigger.
+	AutoQuarantines *prometheus.CounterVec
 }
 
 // New registers all collectors.
@@ -46,8 +48,11 @@ func New() *Metrics {
 		Quarantined: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "sandwall_quarantined", Help: "1 while the sandbox is quarantined.",
 		}, []string{"sandbox"}),
+		AutoQuarantines: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandwall_auto_quarantines_total", Help: "Quarantines started by a policy trigger.",
+		}, []string{"sandbox"}),
 	}
-	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections, m.Quarantined,
+	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections, m.Quarantined, m.AutoQuarantines,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }
@@ -56,7 +61,7 @@ func New() *Metrics {
 // does not grow with sandbox churn.
 func (m *Metrics) Forget(sandboxID string) {
 	l := prometheus.Labels{"sandbox": sandboxID}
-	for _, v := range []*prometheus.CounterVec{m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections} {
+	for _, v := range []*prometheus.CounterVec{m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections, m.AutoQuarantines} {
 		v.DeletePartialMatch(l)
 	}
 	m.Quarantined.DeletePartialMatch(l)
