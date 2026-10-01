@@ -1,6 +1,13 @@
 GO      ?= go
 BIN     := bin/egressd
 GOFLAGS ?=
+# Optional e2e locations; empty means the scripts' defaults.
+FC_ASSETS   ?=
+CHROOT_BASE ?=
+E2E_TMP     ?=
+E2E_ENV = EGRESSD=$(CURDIR)/$(BIN) $(if $(FC_ASSETS),FC_ASSETS=$(FC_ASSETS)) \
+	$(if $(CHROOT_BASE),CHROOT_BASE=$(CHROOT_BASE)) $(if $(E2E_TMP),E2E_TMP=$(E2E_TMP)) \
+	$(foreach v,CLONES CLONE_STAGGER FETCH_CONCURRENCY,$(if $($(v)),$(v)=$($(v))))
 
 .PHONY: build test vet fmt-check e2e e2e-m1 e2e-m2 e2e-m3 fc-assets clean
 
@@ -21,17 +28,17 @@ fmt-check:
 e2e: e2e-m1 e2e-m2 e2e-m3
 
 e2e-m1: build
-	sudo EGRESSD=$(CURDIR)/$(BIN) bash test/e2e/m1.sh
+	sudo $(E2E_ENV) bash test/e2e/m1.sh
 
 e2e-m2: build
-	sudo EGRESSD=$(CURDIR)/$(BIN) bash test/e2e/m2.sh
+	sudo $(E2E_ENV) bash test/e2e/m2.sh
 
 # M3 needs /dev/kvm; fc-assets downloads Firecracker, a guest kernel and rootfs.
 fc-assets:
-	sudo bash test/e2e/fc-assets.sh
+	sudo bash test/e2e/fc-assets.sh $(FC_ASSETS)
 
 e2e-m3: build fc-assets
-	sudo EGRESSD=$(CURDIR)/$(BIN) bash test/e2e/m3.sh
+	sudo $(E2E_ENV) bash test/e2e/m3.sh
 
 clean:
 	rm -rf bin

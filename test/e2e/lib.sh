@@ -6,11 +6,17 @@ set -uo pipefail
 : "${EGRESSD:?set EGRESSD to the egressd binary}"
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-T="$(mktemp -d /tmp/egressd-e2e.XXXXXX)"
+# E2E_TMP: where the per-run directory (state, logs, snapshots) goes. For VM
+# mode keep it on the same filesystem as CHROOT_BASE so clones can hard-link
+# the snapshot memory file instead of copying it.
+E2E_TMP=${E2E_TMP:-/tmp}
+CHROOT_BASE=${CHROOT_BASE:-/srv/jailer}
+mkdir -p "$E2E_TMP"
+T="$(mktemp -d "$E2E_TMP/egressd-e2e.XXXXXX")"
 SOCK="$T/egressd.sock"
 STATE="$T/state"
 LOGS="$T/logs"
-G=(--socket "$SOCK" --state-dir "$STATE" --log-dir "$LOGS")
+G=(--socket "$SOCK" --state-dir "$STATE" --log-dir "$LOGS" --chroot-base "$CHROOT_BASE")
 DAEMON_PID=""
 PASS=0
 FAIL=0
@@ -202,7 +208,7 @@ assert_no_remnants() {
 	expect_eq "no tc qdiscs on sandbox veths" "$(tc qdisc show | grep -c veth-h)" 0
 	expect_eq "no /etc/netns/sb<k> left" "$(find /etc/netns -maxdepth 1 -name 'sb[0-9]*' 2>/dev/null | wc -l)" 0
 	expect_eq "no firecracker processes left" "$(pgrep -c -f 'firecracker --id egressd-sb' || true)" 0
-	expect_eq "no egressd jails left" "$(find /srv/jailer -mindepth 2 -maxdepth 2 -name 'egressd-sb*' 2>/dev/null | wc -l)" 0
+	expect_eq "no egressd jails left" "$(find "$CHROOT_BASE" -mindepth 2 -maxdepth 2 -name 'egressd-sb*' 2>/dev/null | wc -l)" 0
 }
 
 finish() {

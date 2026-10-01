@@ -165,3 +165,98 @@ With 20 clones fetching at once, or 20 simultaneous SSH handshakes into them, on
 So the M3 test keeps all 20 clones running simultaneously, but runs their allowlisted fetches concurrently in waves of `FETCH_CONCURRENCY` (default 8).
 It checks, from the host's conntrack timestamps, that the fetches within each wave overlapped.
 On bare metal, set `FETCH_CONCURRENCY=20` to fetch from all clones at once.
+
+## Upstream proxy (design, not yet implemented)
+
+Many networks allow no direct egress: only an HTTP proxy reaches the internet, while the site resolver still resolves external names.
+On such a host every allowed sandbox flow leaves the uplink and is dropped by the network, so egressd's allow verdicts have no effect.
+Seen on an M3 bare-metal host: the two guest checks that fetch real internet sites got no connection, while all 57 others passed.
+
+### The proxy is a next hop, not a destination
+The sandbox keeps connecting to the real destination, for example `151.101.0.223:443` learned from an allowlisted DNS answer, and egressd keeps enforcing policy on that destination.
+Only after a flow is allowed does egressd carry it onward, as a `CONNECT` through the upstream proxy instead of a masqueraded packet.
+The sandbox needs no proxy settings and cannot see or reach the proxy.
+
+Setting `https_proxy` inside the sandbox was rejected.
+egressd would then only see connections to the proxy, so allowing the proxy would allow everything the proxy can reach, and domain allowlists would stop meaning anything.
+It would also need the sandbox's cooperation.
+
+### Packet flow (TCP)
+```
+sandbox/guest: connect 151.101.0.223:443
+  ▼
+veth-h<k> ─► prerouting filter (priority -150): iifname vmap → jump sb_<k>
+               same rules as today; deny → log + drop
+               allow ▼
+             prerouting nat (dstnat): proxied sandbox, tcp, daddr not local, not @direct_<k>
+               → redirect to 10.200.k.1:15001 (conntrack keeps the original destination)
+               ▼
+             input: sbin_<k> accepts tcp dport 15001 only with ct status dnat
+               ▼
+             relay_<k> in egressd, one listener per sandbox
+               1. original destination from SO_ORIGINAL_DST
+               2. name from the TLS SNI or HTTP Host (peeked), else the DNS cache, else the IP
+               3. the name must match the allowlist and map to that IP, else deny sni_mismatch
+               4. dial the upstream proxy (host traffic) and send CONNECT <name>:<port>
+               5. on 200, replay the peeked bytes and splice; otherwise reset the sandbox
+                  connection and log proxy_refused or proxy_error
+```
+
+### Policy moves from forward to prerouting
+`redirect` happens in prerouting and turns the packet into INPUT traffic, so a policy chain on the forward hook never sees proxied flows.
+`sb_<k>` is therefore jumped from a prerouting filter chain for every sandbox, proxied or not, keeping one code path.
+`fwd_vmap` entries become plain `accept`, and the `unknown_iface` drop stays.
+A `fib daddr type local return` rule near the top of `sb_<k>` leaves host-bound traffic to `sbin_<k>`, so `host_access` behaves as before.
+
+To verify before implementing: whether `reject` is allowed in a prerouting chain on the 5.10 kernel floor, which `conn_reject` relies on.
+If not, prerouting marks over-limit packets and the forward and input chains reject them.
+
+### REDIRECT, not TPROXY
+REDIRECT gives the relay the original destination through `SO_ORIGINAL_DST`, and needs neither policy routing nor `IP_TRANSPARENT` sockets.
+The conntrack entry keeps the original tuple, sandbox to destination, so flow attribution by source address and the byte counts of the sandbox leg work unchanged.
+The relay's own connection to the proxy comes from the host address and is never attributed to a sandbox.
+
+### One relay listener per sandbox
+Each sandbox gets a relay on `10.200.k.1:15001`, next to its DNS proxy.
+The listening address identifies the sandbox, as it does for DNS, so attribution never depends on looking up an IP.
+The `ct status dnat` match in `sbin_<k>` stops a sandbox from connecting to its relay, or another sandbox's, directly.
+
+### CONNECT by name, checked against the allowlist
+The relay sends `CONNECT pypi.org:443`, not `CONNECT 151.101.0.223:443`.
+Proxies often refuse IP CONNECTs, apply their own policy and logging by name, and may be the only component that can resolve external names.
+The name comes from the TLS SNI or HTTP `Host` and must be allowlisted and resolve, in this sandbox's DNS cache, to the original destination.
+This also closes a gap that direct mode has today: an IP learned for one allowlisted name on a shared CDN admits any SNI to that IP.
+The same relay could later enforce the planned SNI check (S1) in direct mode as well.
+
+### The proxy stays out of the sandbox's reach
+The proxy's address stays subject to `blocked_range` for sandbox traffic; only the egressd process talks to it.
+Proxy credentials (`Proxy-Authorization`) stay on the host.
+
+### Plain HTTP, other ports, UDP
+- Proxies commonly allow CONNECT only to port 443. For port 80 the relay parses HTTP/1.1 and forwards each request in absolute form (`GET http://host/path`), checking `Host` on every request of a keep-alive connection.
+- Other TCP ports use CONNECT; a refusal is logged as `proxy_refused`.
+- An HTTP proxy cannot carry UDP. Allowed UDP from a proxied sandbox is rejected with `icmpx admin-prohibited` and logged as `no_proxy_route`, so HTTP/3 clients fall back to TCP at once instead of timing out.
+
+### `no_proxy`
+Destinations matching `no_proxy` go out directly through the existing masquerade path.
+They are kept in a per-sandbox set `direct_<k>`, filled from DNS answers for `no_proxy` names and from `no_proxy` CIDRs, which the redirect rule skips.
+
+### DNS
+Where the site resolver answers external names, nothing changes: the DNS proxy's upstream queries are host traffic.
+Where it resolves only internal names, a later `synthetic` DNS mode would answer allowlisted names with addresses from a per-sandbox pool, and the relay would map them back to names; the proxy does the real resolution.
+DNS still never carries a query for a name that is not allowlisted.
+
+### Configuration
+The proxy is a property of the host network, so it is configured on the daemon, not in sandbox policies:
+`--upstream-proxy http://proxy.example:3128`, `--no-proxy <names and CIDRs>`, or `--upstream-proxy-from-env` to read `http_proxy`, `https_proxy` and `no_proxy`.
+
+### Limits and observability
+- tc shaping on the veth, `ct count` and the new-connection rate all act on the sandbox leg, unchanged.
+- The relay also caps concurrent proxied connections at `max_conns`.
+- A new `proxy` log event records `src_port`, `dst_ip`, `dst_port`, `name`, `sni`, `status` and `connect_ms`; `flow` events are unchanged.
+- New metric `egressd_proxy_connects_total{result}`.
+- VM mode needs no changes: guest traffic is already masqueraded to `10.200.k.2` inside its netns.
+
+### Testing
+The e2e harness gets a small CONNECT proxy in the `egattacker` netns that logs CONNECT targets.
+Checks: an allowlisted fetch arrives at the proxy as `CONNECT <name>:443`; a sandbox connecting to the proxy directly is denied as `blocked_range`; `curl --resolve` of a non-allowlisted name to an allowlisted IP is denied as `sni_mismatch`; UDP to an allowed destination gets `no_proxy_route`; after a `policy apply` that removes a name, new CONNECTs for it stop.
