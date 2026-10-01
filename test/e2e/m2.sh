@@ -46,7 +46,7 @@ t1_down=$(mbps "$T/t1-down.json")
 if ((t1_down <= 22 && t1_down >= 14)); then pass "t1 download ${t1_down} Mbit/s within 20mbit cap"; else fail "t1 download ${t1_down} Mbit/s (cap 20)"; fi
 
 log "connection limits"
-out=$(sbx t3 python3 "$E2E_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 200 2 3)
+out=$(sbx t3 python3 "$SBX_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 200 2 3)
 connected=$(jq .connected <<<"$out")
 refused=$(jq .refused <<<"$out")
 expect_eq "t3 got exactly max_conns connections" "$connected" 64
@@ -54,10 +54,10 @@ expect_eq "remaining 136 rejected" "$refused" 136
 wait_log t3 "conn_limit rejects logged" ".type==\"deny\" and .reason==\"conn_limit\" and .dst_ip==\"$A\" and .dst_port==$ATTACKER_HOLD_PORT"
 # t3 sits at its limit for a while; t1 must be unaffected.
 wait_closed 10.200.3.2 "$ATTACKER_HOLD_PORT"
-sbx t3 python3 "$E2E_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 100 2 6 >"$T/t3-hold.json" &
+sbx t3 python3 "$SBX_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 100 2 6 >"$T/t3-hold.json" &
 HOLD=$!
 sleep 2
-out=$(sbx t1 python3 "$E2E_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 20 2)
+out=$(sbx t1 python3 "$SBX_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 20 2)
 expect_eq "t1 connects normally while t3 is at its limit" "$(jq .connected <<<"$out")" 20
 wait "$HOLD"
 held=$(jq .connected "$T/t3-hold.json")
@@ -68,7 +68,7 @@ if ((held >= 1 && held <= 64)); then pass "t3 never exceeded max_conns ($held he
 wait_closed 10.200.3.2 "$ATTACKER_HOLD_PORT"
 recovered=0
 for try in $(seq 10); do
-	out=$(sbx t3 python3 "$E2E_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 64 2)
+	out=$(sbx t3 python3 "$SBX_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 64 2)
 	wait_closed 10.200.3.2 "$ATTACKER_HOLD_PORT"
 	if [[ "$(jq .connected <<<"$out")" == 64 ]]; then recovered=$try; break; fi
 	sleep 1
@@ -77,7 +77,7 @@ if ((recovered > 0)); then pass "t3 recovers the full 64 connections (attempt $r
 
 log "new-connection rate limit"
 expect_ok "reload t3 to 5 new conns/s" egressd policy apply t3 "$P/m2-rate.yaml"
-out=$(sbx t3 python3 "$E2E_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 40 0.3)
+out=$(sbx t3 python3 "$SBX_DIR/conns.py" "$A" "$ATTACKER_HOLD_PORT" 40 0.3)
 connected=$(jq .connected <<<"$out")
 if ((connected < 40)); then pass "burst of 40 new conns throttled ($connected connected within 0.3s each)"; else fail "no throttling: $out"; fi
 wait_log t3 "rate_limit drops logged" '.type=="deny" and .reason=="rate_limit"'

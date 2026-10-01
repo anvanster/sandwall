@@ -13,6 +13,11 @@ E2E_TMP=${E2E_TMP:-/tmp}
 CHROOT_BASE=${CHROOT_BASE:-/srv/jailer}
 mkdir -p "$E2E_TMP"
 T="$(mktemp -d "$E2E_TMP/egressd-e2e.XXXXXX")"
+# Sandbox commands run as nobody, which may not be able to read the checkout
+# (a 0750 home directory, say), so helpers they run are copied here.
+SBX_DIR="$(mktemp -d "$E2E_TMP/egressd-sbx.XXXXXX")"
+chmod 0755 "$SBX_DIR"
+install -m 0644 "$E2E_DIR/conns.py" "$SBX_DIR/"
 SOCK="$T/egressd.sock"
 STATE="$T/state"
 LOGS="$T/logs"
@@ -215,6 +220,7 @@ finish() {
 	stop_daemon
 	"$EGRESSD" "${G[@]}" nuke >/dev/null 2>&1
 	teardown_attacker
+	rm -rf "$SBX_DIR"
 	printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 	if ((FAIL > 0)); then
 		echo "artifacts kept in $T"
