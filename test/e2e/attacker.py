@@ -1,21 +1,49 @@
 #!/usr/bin/env python3
-"""Mock exfiltration endpoint for e2e tests and demos.
+"""Mock remote endpoint for e2e tests and demos.
 
-Answers GET with "attacker" and records every POST body to a file, so tests
-can assert whether anything was exfiltrated. Unlike `python3 -m http.server`
-it does no reverse DNS lookup at startup, which would hang in a netns
-without a resolver.
+HTTP on --port:
+  GET /             -> "attacker"
+  GET /bytes/<n>    -> n bytes of zeros (download size tests)
+  POST <any>        -> body appended to --loot (exfiltration evidence)
+
+Optional:
+  --hold-port P     accept TCP connections and hold them open (conn limits)
+  --dns-port P      answer UDP DNS for --dns-zone and its subdomains with
+                    --bind's address, NXDOMAIN for anything else
+
+Unlike `python3 -m http.server` it does no reverse DNS lookup at startup,
+which would hang in a netns without a resolver.
 """
 
 import argparse
+import socket
 import socketserver
+import struct
+import threading
 from http.server import BaseHTTPRequestHandler
+
+CHUNK = b"\0" * 65536
 
 
 class Handler(BaseHTTPRequestHandler):
     loot_path = ""
 
     def do_GET(self):
+        if self.path.startswith("/bytes/"):
+            try:
+                n = int(self.path[len("/bytes/"):])
+            except ValueError:
+                self.send_error(400)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(n))
+            self.end_headers()
+            while n > 0:
+                part = CHUNK[: min(n, len(CHUNK))]
+                self.wfile.write(part)
+                n -= len(part)
+            return
         self._reply(b"attacker\n")
 
     def do_POST(self):
@@ -39,6 +67,66 @@ class Handler(BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = 512
+
+
+def hold_server(addr, port):
+    """Accept connections and keep them open until the peer closes.
+
+    Closing our side when the peer does matters: a half-closed connection
+    stays in conntrack's CLOSE_WAIT and still counts against max_conns.
+    """
+    ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    ls.bind((addr, port))
+    ls.listen(1024)
+    while True:
+        conn, _ = ls.accept()
+        threading.Thread(target=hold_until_eof, args=(conn,), daemon=True).start()
+
+
+def hold_until_eof(conn):
+    try:
+        while conn.recv(4096):
+            pass
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+
+def dns_server(addr, port, zone):
+    """Minimal UDP DNS responder: A records for zone and its subdomains."""
+    zone = zone.lower().rstrip(".")
+    ip = socket.inet_aton(addr)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind((addr, port))
+    while True:
+        data, peer = s.recvfrom(4096)
+        if len(data) < 12:
+            continue
+        qid, flags, qd = struct.unpack("!HHH", data[:6])
+        if qd != 1:
+            continue
+        labels, i = [], 12
+        while i < len(data) and data[i] != 0:
+            n = data[i]
+            labels.append(data[i + 1 : i + 1 + n].decode("ascii", "replace"))
+            i += 1 + n
+        i += 1
+        if i + 4 > len(data):
+            continue
+        qtype, qclass = struct.unpack("!HH", data[i : i + 4])
+        question = data[12 : i + 4]
+        name = ".".join(labels).lower()
+        in_zone = name == zone or name.endswith("." + zone)
+        answer = b""
+        rcode = 0 if in_zone else 3
+        if in_zone and qtype == 1 and qclass == 1:
+            answer = struct.pack("!HHHIH", 0xC00C, 1, 1, 60, 4) + ip
+        rd = flags & 0x0100
+        header = struct.pack("!HHHHHH", qid, 0x8000 | 0x0400 | rd | 0x0080 | rcode, 1, 1 if answer else 0, 0, 0)
+        s.sendto(header + question + answer, peer)
 
 
 def main():
@@ -46,8 +134,15 @@ def main():
     ap.add_argument("--bind", required=True)
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--loot", required=True, help="file that receives POST bodies")
+    ap.add_argument("--hold-port", type=int)
+    ap.add_argument("--dns-port", type=int)
+    ap.add_argument("--dns-zone", default="attacker.test")
     args = ap.parse_args()
     Handler.loot_path = args.loot
+    if args.hold_port:
+        threading.Thread(target=hold_server, args=(args.bind, args.hold_port), daemon=True).start()
+    if args.dns_port:
+        threading.Thread(target=dns_server, args=(args.bind, args.dns_port, args.dns_zone), daemon=True).start()
     with Server((args.bind, args.port), Handler) as srv:
         print("listening on %s:%d" % (args.bind, args.port), flush=True)
         srv.serve_forever()

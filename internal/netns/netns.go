@@ -129,9 +129,11 @@ func Destroy(sb addressing.Sandbox) error {
 	if err := killNetnsProcesses(sb.Netns); err != nil {
 		errs = append(errs, err)
 	}
-	if link, err := netlink.LinkByName(sb.HostVeth); err == nil {
-		if err := netlink.LinkDel(link); err != nil {
-			errs = append(errs, fmt.Errorf("delete %s: %w", sb.HostVeth, err))
+	for _, name := range []string{sb.HostVeth, sb.IFB} {
+		if link, err := netlink.LinkByName(name); err == nil {
+			if err := netlink.LinkDel(link); err != nil {
+				errs = append(errs, fmt.Errorf("delete %s: %w", name, err))
+			}
 		}
 	}
 	if err := deleteNamed(sb.Netns); err != nil {
@@ -155,7 +157,7 @@ func WriteResolvConf(sb addressing.Sandbox) error {
 }
 
 // Leftovers lists every sandbox index that still has any egressd-named
-// netns, host veth or /etc/netns directory on this host.
+// netns, host veth, IFB or /etc/netns directory on this host.
 func Leftovers() ([]int, error) {
 	seen := map[int]bool{}
 	for _, dir := range []string{RunDir, EtcNetnsDir} {
@@ -175,6 +177,9 @@ func Leftovers() ([]int, error) {
 	}
 	for _, l := range links {
 		if k, ok := addressing.IndexFromHostVeth(l.Attrs().Name); ok {
+			seen[k] = true
+		}
+		if k, ok := addressing.IndexFromIFB(l.Attrs().Name); ok {
 			seen[k] = true
 		}
 	}

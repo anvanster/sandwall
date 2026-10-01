@@ -11,6 +11,7 @@
 //	  chain postrouting (hook)  masquerade sandbox traffic leaving the host
 //	  chain sb_<k>      per-sandbox egress policy (PRD §6 rules 1-9)
 //	  chain sbin_<k>    per-sandbox access to host-local addresses (DNS proxy only)
+//	  chain conn_reject shared reject for connection-limit overflows
 //	  set allow_<k>     DNS-learned IPs, per-element timeout
 //	  set allow_cidr_<k> static CIDRs from policy
 //
@@ -122,13 +123,23 @@ func (b *builder) line(format string, args ...any) {
 	b.WriteByte('\n')
 }
 
-// declareBase emits idempotent declarations of the table, global sets and maps.
+// declareBase emits idempotent declarations of the table, global sets and
+// maps, and fully (re)defines conn_reject: sandbox chains jump to it, and an
+// empty conn_reject would let over-limit connections fall through.
 func (b *builder) declareBase() {
-	b.line("add table inet %s", Table)
-	b.line("add set inet %s blocked_ranges { type ipv4_addr; flags interval; auto-merge; }", Table)
-	b.line("add set inet %s blocked_exempt { type ipv4_addr; flags interval; auto-merge; }", Table)
-	b.line("add map inet %s fwd_vmap { type ifname : verdict; }", Table)
-	b.line("add map inet %s in_vmap { type ifname : verdict; }", Table)
+	t := Table
+	b.line("add table inet %s", t)
+	b.line("add set inet %s blocked_ranges { type ipv4_addr; flags interval; auto-merge; }", t)
+	b.line("add set inet %s blocked_exempt { type ipv4_addr; flags interval; auto-merge; }", t)
+	b.line("add map inet %s fwd_vmap { type ifname : verdict; }", t)
+	b.line("add map inet %s in_vmap { type ifname : verdict; }", t)
+	// TCP gets a reset: ICMP errors are rate-limited per destination by the
+	// kernel (net.ipv4.icmp_ratelimit), which turns most rejects of a
+	// connection burst into silent drops and client timeouts.
+	b.line("add chain inet %s conn_reject", t)
+	b.line("flush chain inet %s conn_reject", t)
+	b.line("add rule inet %s conn_reject meta l4proto tcp reject with tcp reset", t)
+	b.line("add rule inet %s conn_reject reject with icmpx admin-prohibited", t)
 }
 
 // RenderBase renders the host-wide ruleset. Re-applying it replaces the
@@ -220,7 +231,7 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 		chain, cfg.NewConnsPerSec, cfg.NewConnsPerSec, logDrop(k, ReasonRateLimit))
 	// 6. Concurrent connections. Anonymous connlimit state is per rule, and
 	//    this rule only sees sandbox k's packets, so the count is per sandbox.
-	b.line("%s ct state new ct count over %d counter log group %d prefix %q reject",
+	b.line("%s ct state new ct count over %d counter log group %d prefix %q jump conn_reject",
 		chain, cfg.MaxConns, LogGroup, LogPrefix(k, ReasonConnLimit))
 	// 7-8. Allowlist.
 	b.line("%s ip daddr @allow_%d accept", chain, k)

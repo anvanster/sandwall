@@ -21,6 +21,8 @@ ATTACKER_NS=egattacker
 ATTACKER_IP=10.99.0.1
 ATTACKER_GW=10.99.0.254
 ATTACKER_PORT=8080
+ATTACKER_HOLD_PORT=9000
+ATTACKER_DNS_PORT=5353
 
 UPLINK="$(ip -4 route show default | awk '{for (i=1;i<NF;i++) if ($i=="dev") print $(i+1); exit}')"
 HOST_IP="$(ip -4 -o addr show dev "$UPLINK" | awk '{split($4,a,"/"); print a[1]; exit}')"
@@ -105,12 +107,44 @@ setup_attacker() {
 	ATTACKER_LOOT="$T/loot.txt"
 	: >"$ATTACKER_LOOT"
 	ip netns exec "$ATTACKER_NS" python3 "$E2E_DIR/attacker.py" --bind "$ATTACKER_IP" \
-		--port "$ATTACKER_PORT" --loot "$ATTACKER_LOOT" >"$T/attacker.log" 2>&1 &
+		--port "$ATTACKER_PORT" --loot "$ATTACKER_LOOT" \
+		--hold-port "$ATTACKER_HOLD_PORT" --dns-port "$ATTACKER_DNS_PORT" >"$T/attacker.log" 2>&1 &
 	for _ in $(seq 50); do
 		curl -s -m 1 "http://$ATTACKER_IP:$ATTACKER_PORT/" >/dev/null && return 0
 		sleep 0.1
 	done
 	echo "attacker endpoint failed to start" >&2
+	return 1
+}
+
+# start_iperf <port...>: iperf3 servers in the attacker netns.
+start_iperf() {
+	local port
+	for port in "$@"; do
+		ip netns exec "$ATTACKER_NS" iperf3 -s -B "$ATTACKER_IP" -p "$port" -D --logfile "$T/iperf-$port.log"
+	done
+	sleep 0.5
+}
+
+# mbps <iperf3 json file>: receiver-side throughput in Mbit/s, integer.
+mbps() { jq '.end.sum_received.bits_per_second / 1e6 | floor' "$1"; }
+
+# metric <name> <labels-regex>: value of a Prometheus series, or empty.
+metric() {
+	curl -s http://127.0.0.1:19464/metrics | awk -v n="$1" -v l="$2" '$1 ~ "^"n"\\{" && $1 ~ l {print $2; exit}'
+}
+
+# wait_closed <src ip> <dst port>: wait until no TCP connection from src to
+# dst port is still open in conntrack (TIME_WAIT/CLOSE do not count against
+# connection limits; every other state does).
+wait_closed() {
+	for _ in $(seq 100); do
+		if ! conntrack -L -p tcp -s "$1" --dport "$2" 2>/dev/null | grep -vqE 'TIME_WAIT|CLOSE '; then
+			return 0
+		fi
+		sleep 0.1
+	done
+	echo "connections from $1 to port $2 still open" >&2
 	return 1
 }
 
@@ -125,6 +159,7 @@ teardown_attacker() {
 assert_no_remnants() {
 	expect_eq "no sb<k> netns left" "$(ip netns list | grep -cE '^sb[0-9]+')" 0
 	expect_eq "no veth-h<k> links left" "$(ip -o link | grep -cE ' veth-[hs][0-9]+')" 0
+	expect_eq "no eg-ifb<k> links left" "$(ip -o link | grep -cE ' eg-ifb[0-9]+')" 0
 	expect_eq "no egressd nft table left" "$(nft list tables | grep -c egressd)" 0
 	expect_eq "no tc qdiscs on sandbox veths" "$(tc qdisc show | grep -c veth-h)" 0
 	expect_eq "no /etc/netns/sb<k> left" "$(find /etc/netns -maxdepth 1 -name 'sb[0-9]*' 2>/dev/null | wc -l)" 0

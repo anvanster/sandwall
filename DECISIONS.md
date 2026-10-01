@@ -70,3 +70,48 @@ It owns sandbox lifecycle and is the only package that composes netns, nft, dnsp
 ### Go version
 `go.mod` requires Go 1.26 rather than 1.22.
 The current `golang.org/x/{net,sys,sync,time}` releases require Go 1.25 to 1.26, and pinning older versions to meet the PRD floor would mean shipping stale security fixes.
+
+## M2
+
+### Sandbox-to-world shaping uses IFB + tbf, not a policer
+PRD §6 suggests an ingress policer on `veth-h<k>` for `max_egress_bw`.
+Measured on the e2e host, a policer with a 10 Mbit cap let TCP reach only 2 Mbit/s, and a 200 Mbit cap only 48 Mbit/s.
+A policer drops instead of queueing, and on a sub-millisecond veth path TCP keeps backing off.
+Instead, an ingress u32 match-all filter on `veth-h<k>` redirects packets to an IFB device `eg-ifb<k>`, whose `tbf` root qdisc queues and shapes them.
+With that, the same caps measure 9 and 191 Mbit/s.
+`max_ingress_bw` is the PRD's `tbf` on `veth-h<k>` egress.
+A u32 filter is used because `cls_matchall` is not built into every kernel.
+`eg-ifb<k>` is created only while an egress cap is set, and `destroy`/`nuke` remove it.
+
+### Connection-limit rejects use TCP reset
+The PRD's `ct count over N reject` sends ICMP port-unreachable.
+The kernel rate-limits ICMP errors per destination (`net.ipv4.icmp_ratelimit`), so in a burst most rejects became silent drops and the client timed out (observed: 16 refused, 20 timed out of 36).
+Over-limit connections now jump to a shared `conn_reject` chain that answers TCP with a reset and everything else with `icmpx admin-prohibited`.
+The count stays one anonymous `ct count` per sandbox chain, so TCP and UDP share one budget.
+
+### Connection-limit semantics verified per sandbox
+The anonymous `ct count` in `sb_<k>` only sees sandbox k's packets, so its count is per sandbox.
+The M2 e2e test holds sandbox t3 at its 64-connection limit while t1 opens 20 connections without any rejects.
+Connections that are only half closed (CLOSE_WAIT) still count, as they should.
+
+Known gap: `ct count` (the kernel's `nf_conncount`, shared with iptables `connlimit`) prunes its list lazily.
+Closed connections and rejected attempts stay in the list until a later connection attempt prunes them, at most once per jiffy and about 8 entries at a time.
+So right after a burst of rejects or closes, the limit is temporarily stricter than configured.
+Measured after 136 rejects and 64 closes: a fast burst of 64 new connections got 11 through immediately, 43 after 1s, and all 64 after 3s.
+Connections opened 20ms apart were unaffected.
+The limit never under-enforces.
+
+### Flow log timing
+Conntrack only sends DESTROY, the one event with byte counters, after a closed TCP connection leaves TIME_WAIT (120s by default).
+To log flows promptly, the collector also listens to UPDATE events.
+When a TCP flow reaches TIME_WAIT or CLOSE, it fetches the entry's counters with a conntrack query, logs the flow then, and skips the later DESTROY.
+Other protocols are logged at DESTROY.
+`ts_start` comes from `nf_conntrack_timestamp` where the kernel has it (enabled as an optional sysctl).
+Otherwise it comes from the time the collector saw the flow's NEW event.
+Byte counts are layer 3, so they include IP and TCP headers.
+On the 10 MiB e2e download they come out 1.4 to 1.7% above the payload size.
+
+### `egressd_flows_total{verdict="deny"}`
+Denied traffic never becomes a confirmed conntrack flow, so there is no denied "flow" to count.
+This series counts logged deny events, which are de-duplicated per second, as an approximation of denied flow attempts.
+`egressd_denied_total{reason}` counts every dropped or rejected packet.

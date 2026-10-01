@@ -29,6 +29,7 @@ import (
 	"github.com/anvanster/egressd/internal/netns"
 	"github.com/anvanster/egressd/internal/nft"
 	"github.com/anvanster/egressd/internal/policy"
+	"github.com/anvanster/egressd/internal/shaper"
 )
 
 // Sandbox modes.
@@ -288,6 +289,9 @@ func (mgr *Manager) setupLocked(ctx context.Context, rec Record, pol *policy.Pol
 	if err := netns.Create(sb); err != nil {
 		return err
 	}
+	if err := shaper.Apply(ctx, sb, shapeLimits(pol)); err != nil {
+		return err
+	}
 	if rec.Mode == ModeExec {
 		if err := netns.WriteResolvConf(sb); err != nil {
 			return err
@@ -332,6 +336,10 @@ func sandboxRules(k int, pol *policy.Policy, allowed []nft.AllowEntry, preserve 
 	}
 }
 
+func shapeLimits(pol *policy.Policy) shaper.Limits {
+	return shaper.Limits{EgressBits: pol.EgressBitsPerSec(), IngressBits: pol.IngressBitsPerSec()}
+}
+
 func (mgr *Manager) proxySettings(pol *policy.Policy) dnsproxy.Settings {
 	up := pol.UpstreamDNS
 	if up == "" {
@@ -372,6 +380,9 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 		// Put the proxy back on the old policy; the nft transaction was atomic.
 		_ = s.proxy.Reload(mgr.proxySettings(s.policy), func([]nft.AllowEntry) error { return nil })
 		return Info{}, err
+	}
+	if err := shaper.Apply(ctx, s.addr, shapeLimits(pol)); err != nil {
+		return Info{}, fmt.Errorf("policy applied to firewall and DNS but not to tc: %w", err)
 	}
 	rec := s.rec
 	rec.Policy = policyYAML
@@ -499,6 +510,18 @@ func (mgr *Manager) SandboxForIndex(k int) (string, bool) {
 		return "", false
 	}
 	return s.rec.ID, true
+}
+
+// Domain returns the allowlisted name that most recently resolved to ip in
+// sandbox k, for flow-log attribution.
+func (mgr *Manager) Domain(k int, ip netip.Addr) string {
+	mgr.mu.Lock()
+	s, ok := mgr.byIndex[k]
+	mgr.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	return s.proxy.Domain(ip)
 }
 
 // Sink exposes the event sink for collectors.

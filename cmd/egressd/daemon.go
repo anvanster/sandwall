@@ -72,11 +72,25 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 
 	deny := flowlog.NewDenyCollector(mgr.Sink(), mgr.SandboxForIndex,
-		func(id, reason string) { m.Denied.WithLabelValues(id, reason).Inc() }, log)
+		func(id, reason string, logged bool) {
+			m.Denied.WithLabelValues(id, reason).Inc()
+			if logged {
+				// A logged (de-duplicated) deny approximates one denied flow attempt.
+				m.Flows.WithLabelValues(id, "deny").Inc()
+			}
+		}, log)
 	go func() { errc <- wrap("deny collector", deny.Run(ctx)) }()
+
+	flows := flowlog.NewFlowCollector(mgr.Sink(), mgr,
+		func(id string, out, in uint64) {
+			m.Flows.WithLabelValues(id, "allow").Inc()
+			m.Bytes.WithLabelValues(id, "out").Add(float64(out))
+			m.Bytes.WithLabelValues(id, "in").Add(float64(in))
+		}, log)
+	go func() { errc <- wrap("flow collector", flows.Run(ctx)) }()
 
 	if metricsAddr != "" {
 		mux := http.NewServeMux()

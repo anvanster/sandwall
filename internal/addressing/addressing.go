@@ -31,6 +31,7 @@ const TapName = "tap0"
 var (
 	netnsPattern    = regexp.MustCompile(`^sb([0-9]+)$`)
 	hostVethPattern = regexp.MustCompile(`^veth-h([0-9]+)$`)
+	ifbPattern      = regexp.MustCompile(`^eg-ifb([0-9]+)$`)
 )
 
 // Sandbox holds the derived names and addresses for index k.
@@ -39,6 +40,7 @@ type Sandbox struct {
 	Netns    string // sb<k>
 	HostVeth string // veth-h<k>
 	NsVeth   string // veth-s<k>
+	IFB      string // eg-ifb<k>: carries sandbox->world traffic for shaping
 	HostAddr netip.Addr
 	NsAddr   netip.Addr
 	Transfer netip.Prefix // 10.200.k.0/30
@@ -55,6 +57,7 @@ func For(k int) (Sandbox, error) {
 		Netns:    "sb" + strconv.Itoa(k),
 		HostVeth: "veth-h" + strconv.Itoa(k),
 		NsVeth:   "veth-s" + strconv.Itoa(k),
+		IFB:      "eg-ifb" + strconv.Itoa(k),
 		HostAddr: netip.AddrFrom4([4]byte{10, 200, byte(k), 1}),
 		NsAddr:   netip.AddrFrom4([4]byte{10, 200, byte(k), 2}),
 		Transfer: netip.PrefixFrom(netip.AddrFrom4(base), 30),
@@ -75,6 +78,9 @@ func IndexFromNetns(name string) (int, bool) { return parseIndex(netnsPattern, n
 
 // IndexFromHostVeth parses "veth-h<k>", returning false for foreign names.
 func IndexFromHostVeth(name string) (int, bool) { return parseIndex(hostVethPattern, name) }
+
+// IndexFromIFB parses "eg-ifb<k>", returning false for foreign names.
+func IndexFromIFB(name string) (int, bool) { return parseIndex(ifbPattern, name) }
 
 func parseIndex(re *regexp.Regexp, name string) (int, bool) {
 	m := re.FindStringSubmatch(name)

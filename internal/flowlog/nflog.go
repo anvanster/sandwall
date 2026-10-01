@@ -22,8 +22,9 @@ const dedupeWindow = time.Second
 // Resolver maps a sandbox index from a log prefix to its sandbox ID.
 type Resolver func(k int) (sandboxID string, ok bool)
 
-// DenyCounter is notified of every denied packet.
-type DenyCounter func(sandboxID, reason string)
+// DenyCounter is notified of every denied packet. logged is false for
+// packets whose log line was suppressed as a duplicate.
+type DenyCounter func(sandboxID, reason string, logged bool)
 
 // DenyCollector turns NFLOG messages from egressd's deny rules into events.
 type DenyCollector struct {
@@ -102,10 +103,6 @@ func (c *DenyCollector) handle(a nflog.Attribute) {
 			ev.Proto, ev.DstIP, ev.DstPort = p.Proto, p.Dst.String(), p.DstPort
 		}
 	}
-	if c.count != nil {
-		c.count(id, reason)
-	}
-
 	key := denyKey{k: k, reason: reason, proto: ev.Proto, dst: ev.DstIP, dstPort: ev.DstPort}
 	now := time.Now()
 	c.mu.Lock()
@@ -117,6 +114,9 @@ func (c *DenyCollector) handle(a nflog.Attribute) {
 	c.mu.Unlock()
 	if !suppress {
 		c.sink.Write(ev)
+	}
+	if c.count != nil {
+		c.count(id, reason, !suppress)
 	}
 }
 

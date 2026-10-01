@@ -7,7 +7,7 @@ func TestFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Netns != "sb7" || s.HostVeth != "veth-h7" || s.NsVeth != "veth-s7" ||
+	if s.Netns != "sb7" || s.HostVeth != "veth-h7" || s.NsVeth != "veth-s7" || s.IFB != "eg-ifb7" ||
 		s.HostAddr.String() != "10.200.7.1" || s.NsAddr.String() != "10.200.7.2" || s.Transfer.String() != "10.200.7.0/30" {
 		t.Errorf("got %+v", s)
 	}
@@ -40,6 +40,8 @@ func TestIndexParsers(t *testing.T) {
 		{"veth", IndexFromHostVeth, "veth-s12", 0, false},
 		{"veth", IndexFromHostVeth, "veth-h", 0, false},
 		{"veth", IndexFromHostVeth, "vethabc123", 0, false},
+		{"ifb", IndexFromIFB, "eg-ifb3", 3, true},
+		{"ifb", IndexFromIFB, "ifb0", 0, false},
 	}
 	for _, c := range cases {
 		k, ok := c.fn(c.in)

@@ -1,0 +1,8 @@
+egress:
+  default: deny
+  allow_domains: [attacker.test]
+  allow_cidrs: [10.99.0.1]
+upstream_dns: 10.99.0.1:5353
+limits:
+  max_conns: 64
+  new_conns_per_sec: 1000
