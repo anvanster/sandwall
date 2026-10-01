@@ -8,13 +8,14 @@
 //	  set direct_cidrs                          (global, interval) no_proxy CIDRs
 //	  map pre_vmap, in_vmap, nat_vmap           (ifname -> jump sb_<k> / sbin_<k> / sbnat_<k>)
 //	  chain prerouting  (hook)  host-bound traffic to input; iifname vmap @pre_vmap; unknown veth-h* drop
-//	  chain proxy_redirect (hook, nat) with an upstream proxy: iifname vmap @nat_vmap
+//	  chain relay_redirect (hook, nat) with the relay: iifname vmap @nat_vmap
 //	  chain forward     (hook)  nothing reaches a sandbox but replies
 //	  chain input       (hook)  iifname vmap @in_vmap;  unknown veth-h* drop
 //	  chain postrouting (hook)  masquerade sandbox traffic leaving the host
 //	  chain sb_<k>      per-sandbox egress policy
 //	  chain sbin_<k>    per-sandbox access to host-local addresses (DNS proxy only)
-//	  chain sbnat_<k>   with an upstream proxy: allowed TCP to the relay, except direct destinations
+//	  chain sbnat_<k>   allowed TCP to the relay: all of it with an upstream proxy (except
+//	                    no_proxy destinations), ports 80 and 443 with the SNI check
 //	  chain conn_reject shared reject for connection-limit overflows
 //	  set allow_<k>     DNS-learned IPs, per-element timeout
 //	  set allow_cidr_<k> static CIDRs from policy
@@ -56,7 +57,13 @@ const (
 	// ReasonNoProxyRoute: allowed non-TCP traffic from a proxied sandbox,
 	// which an HTTP proxy cannot carry.
 	ReasonNoProxyRoute = "no_proxy_route"
+	// ReasonQUICBlocked: with the SNI check, QUIC (UDP 443) to a
+	// DNS-learned address, whose server name the relay cannot check.
+	ReasonQUICBlocked = "quic_blocked"
 )
+
+// SNIPorts are the TCP ports the SNI check sends through the relay.
+var SNIPorts = []int{80, 443}
 
 // PreroutingPriority runs sandbox policy after conntrack (-200) and before
 // the proxy redirect (dstnat, -100).
@@ -85,6 +92,9 @@ type BaseConfig struct {
 	// Proxy redirects allowed sandbox TCP to the per-sandbox relay on
 	// addressing.RelayPort instead of forwarding it.
 	Proxy bool
+	// SNICheck redirects allowed sandbox TCP to ports 80 and 443 to the
+	// relay, which checks the TLS SNI or HTTP Host. Implied by Proxy.
+	SNICheck bool
 	// DirectCIDRs are no_proxy destinations: allowed traffic to them is
 	// forwarded as without a proxy.
 	DirectCIDRs []netip.Prefix
@@ -105,6 +115,10 @@ type SandboxConfig struct {
 	// other allowed traffic is rejected because the proxy cannot carry it,
 	// except to no_proxy destinations (direct_<k>, direct_cidrs).
 	Proxied bool
+	// SNICheck matches BaseConfig.SNICheck: allowed TCP to ports 80 and
+	// 443 goes to the relay, and QUIC to DNS-learned addresses is rejected.
+	// Proxied sandboxes get the check for all TCP anyway.
+	SNICheck bool
 	// Direct repopulates direct_<k> after the flush on (re)apply, like
 	// Allowed; PreserveAllowed keeps it as is unless ResetDirect is set.
 	Direct      []AllowEntry
@@ -198,11 +212,16 @@ func RenderBase(cfg BaseConfig) string {
 	b.line("add rule inet %s prerouting iifname vmap @pre_vmap", t)
 	b.line("add rule inet %s prerouting iifname \"veth-h*\" %s", t, logDrop(0, ReasonUnknownIface))
 
+	// proxy_redirect was this chain's name before the relay also served the
+	// SNI check without a proxy.
 	b.line("add chain inet %s proxy_redirect { type nat hook prerouting priority dstnat; policy accept; }", t)
 	b.line("flush chain inet %s proxy_redirect", t)
-	if cfg.Proxy {
+	b.line("delete chain inet %s proxy_redirect", t)
+	b.line("add chain inet %s relay_redirect { type nat hook prerouting priority dstnat; policy accept; }", t)
+	b.line("flush chain inet %s relay_redirect", t)
+	if cfg.Proxy || cfg.SNICheck {
 		// Only traffic sb_<k> accepted gets here; sbnat_<k> redirects it.
-		b.line("add rule inet %s proxy_redirect iifname vmap @nat_vmap", t)
+		b.line("add rule inet %s relay_redirect iifname vmap @nat_vmap", t)
 	}
 
 	b.line("add chain inet %s forward { type filter hook forward priority filter; policy accept; }", t)
@@ -313,6 +332,12 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 				chain, set, k, LogGroup, LogPrefix(k, ReasonNoProxyRoute))
 		}
 	} else {
+		if cfg.SNICheck {
+			// QUIC carries its server name encrypted, so the relay cannot
+			// check it. allow_cidrs do not depend on the name.
+			b.line("%s ip daddr @allow_%d ip daddr != @allow_cidr_%d udp dport 443 counter log group %d prefix %q jump conn_reject",
+				chain, k, k, LogGroup, LogPrefix(k, ReasonQUICBlocked))
+		}
 		b.line("%s ip daddr @allow_%d accept", chain, k)
 		b.line("%s ip daddr @allow_cidr_%d accept", chain, k)
 	}
@@ -322,20 +347,23 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	in := fmt.Sprintf("add rule inet %s sbin_%d", t, k)
 	b.line("%s ct state established,related accept", in)
 	b.line("%s ip daddr %s meta l4proto { tcp, udp } th dport 53 accept", in, sb.HostAddr)
-	if cfg.Proxied {
-		// Only connections the proxy redirect sent here; a sandbox
+	if cfg.Proxied || cfg.SNICheck {
+		// Only connections the relay redirect sent here; a sandbox
 		// connecting to the relay port directly is host access.
 		b.line("%s ip daddr %s tcp dport %d ct status dnat accept", in, sb.HostAddr, addressing.RelayPort)
 	}
 	b.line("%s %s", in, logDrop(k, ReasonHostAccess))
 
-	if cfg.Proxied {
-		// Runs only for traffic sb_<k> accepted. The redirect target is the
-		// incoming interface's address, 10.200.k.1, where the relay listens.
-		nat := fmt.Sprintf("add rule inet %s sbnat_%d", t, k)
+	// Runs only for traffic sb_<k> accepted. The redirect target is the
+	// incoming interface's address, 10.200.k.1, where the relay listens.
+	nat := fmt.Sprintf("add rule inet %s sbnat_%d", t, k)
+	switch {
+	case cfg.Proxied:
 		b.line("%s ip daddr @direct_%d return", nat, k)
 		b.line("%s ip daddr @direct_cidrs return", nat)
 		b.line("%s meta l4proto tcp fib daddr type != local redirect to :%d", nat, addressing.RelayPort)
+	case cfg.SNICheck:
+		b.line("%s tcp dport { %s } fib daddr type != local redirect to :%d", nat, joinInts(SNIPorts), addressing.RelayPort)
 	}
 
 	b.line("add element inet %s pre_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
@@ -403,6 +431,14 @@ func RenderAllow(k int, entries []AllowEntry, direct bool) string {
 // RenderDeleteTable removes everything egressd ever created in nftables.
 func RenderDeleteTable() string {
 	return fmt.Sprintf("add table inet %s\ndelete table inet %s\n", Table, Table)
+}
+
+func joinInts(ns []int) string {
+	s := make([]string, len(ns))
+	for i, n := range ns {
+		s[i] = fmt.Sprint(n)
+	}
+	return strings.Join(s, ", ")
 }
 
 func joinPrefixes(ps []netip.Prefix) string {

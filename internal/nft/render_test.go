@@ -79,6 +79,20 @@ func TestRenderSandboxProxied(t *testing.T) {
 	golden(t, "sandbox-proxy.nft", got)
 }
 
+func TestRenderBaseSNICheck(t *testing.T) {
+	golden(t, "base-sni.nft", RenderBase(BaseConfig{BlockedRanges: DefaultBlockedRanges, SNICheck: true}))
+}
+
+func TestRenderSandboxSNICheck(t *testing.T) {
+	got, err := RenderSandbox(SandboxConfig{
+		Index: 7, AllowCIDRs: []string{"203.0.113.0/24"}, MaxConns: 64, NewConnsPerSec: 20, SNICheck: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "sandbox-sni.nft", got)
+}
+
 func TestRenderSandboxRejectsBadInput(t *testing.T) {
 	if _, err := RenderSandbox(SandboxConfig{Index: 0, MaxConns: 1, NewConnsPerSec: 1}); err == nil {
 		t.Error("index 0 accepted")

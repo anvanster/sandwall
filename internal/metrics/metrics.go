@@ -17,9 +17,9 @@ type Metrics struct {
 	Bytes      *prometheus.CounterVec
 	DNSQueries *prometheus.CounterVec
 	Denied     *prometheus.CounterVec
-	// ProxyConnects counts relay decisions: ok, denied, refused (by the
-	// upstream proxy) or error.
-	ProxyConnects *prometheus.CounterVec
+	// RelayConnections counts relay decisions: ok, denied, refused (by
+	// the upstream proxy) or error.
+	RelayConnections *prometheus.CounterVec
 }
 
 // New registers all collectors.
@@ -38,11 +38,11 @@ func New() *Metrics {
 		Denied: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "egressd_denied_total", Help: "Packets dropped or rejected by reason.",
 		}, []string{"sandbox", "reason"}),
-		ProxyConnects: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "egressd_proxy_connects_total", Help: "Connections and HTTP requests through the upstream proxy by result.",
+		RelayConnections: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "egressd_relay_connections_total", Help: "Connections and HTTP requests through the relay (SNI/Host check, upstream proxy) by result.",
 		}, []string{"sandbox", "result"}),
 	}
-	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.ProxyConnects,
+	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }
@@ -51,7 +51,7 @@ func New() *Metrics {
 // does not grow with sandbox churn.
 func (m *Metrics) Forget(sandboxID string) {
 	l := prometheus.Labels{"sandbox": sandboxID}
-	for _, v := range []*prometheus.CounterVec{m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.ProxyConnects} {
+	for _, v := range []*prometheus.CounterVec{m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections} {
 		v.DeletePartialMatch(l)
 	}
 }

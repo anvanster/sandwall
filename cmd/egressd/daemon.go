@@ -32,6 +32,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 		proxyURL    string
 		proxyEnv    bool
 		noProxy     string
+		sniCheck    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -77,7 +78,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes)
+			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, sniCheck)
 		},
 	}
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", ":9464", "Prometheus listen address (empty to disable)")
@@ -87,6 +88,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().StringVar(&paths.Jailer, "jailer", "", "jailer binary (enables vm mode)")
 	cmd.Flags().StringVar(&proxyURL, "upstream-proxy", "", "carry allowed sandbox TCP through this HTTP proxy, http://[user:pass@]host:port")
 	cmd.Flags().BoolVar(&proxyEnv, "upstream-proxy-from-env", false, "take --upstream-proxy from https_proxy or http_proxy, and --no-proxy from no_proxy")
+	cmd.Flags().BoolVar(&sniCheck, "sni-check", true, "check the TLS SNI or HTTP Host of allowed connections to ports 80 and 443 against the allowlist (--sni-check=false to forward them unchecked)")
 	cmd.Flags().StringVar(&noProxy, "no-proxy", "", "comma-separated names, IPv4 addresses and CIDRs that bypass the upstream proxy (no_proxy syntax)")
 	return cmd
 }
@@ -120,7 +122,7 @@ func envFirst(names ...string) string {
 }
 
 func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths,
-	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string) error {
+	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, sniCheck bool) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(exempt) > 0 {
 		log.Warn("blocked ranges have exemptions; do not use in production", "exempt", exempt)
@@ -140,6 +142,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		DefaultUpstream: upstream,
 		UpstreamProxy:   proxy,
 		NoProxy:         noProxy,
+		SNICheck:        sniCheck,
 		FC:              paths,
 		Log:             log,
 		Metrics:         m,

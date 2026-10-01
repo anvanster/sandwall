@@ -104,6 +104,15 @@ func newHarness(t *testing.T, proxyStatus int, dst netip.AddrPort, s Settings, d
 	if err != nil {
 		t.Fatal(err)
 	}
+	h := startRelay(t, up, dst, s, domain)
+	h.proxy = p
+	return h
+}
+
+// startRelay starts a relay whose connections all claim dst as their
+// original destination. A nil up makes it dial dst directly.
+func startRelay(t *testing.T, up *Upstream, dst netip.AddrPort, s Settings, domain string) *harness {
+	t.Helper()
 	dir := t.TempDir()
 	sink, err := flowlog.NewSink(dir)
 	if err != nil {
@@ -124,7 +133,7 @@ func newHarness(t *testing.T, proxyStatus int, dst netip.AddrPort, s Settings, d
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Stop)
-	return &harness{relay: r, proxy: p, log: filepath.Join(dir, "sb.jsonl")}
+	return &harness{relay: r, log: filepath.Join(dir, "sb.jsonl")}
 }
 
 func (h *harness) dial(t *testing.T) net.Conn {
@@ -201,7 +210,7 @@ func TestTLSAllowedSNI(t *testing.T) {
 		t.Errorf("Proxy-Authorization %q", a)
 	}
 	ev := h.events(t, 1)[0]
-	if ev.Type != flowlog.TypeProxy || ev.Verdict != "allow" || ev.SNI != "PyPI.org" || ev.Target != "pypi.org:443" ||
+	if ev.Type != flowlog.TypeRelay || ev.Verdict != "allow" || ev.SNI != "PyPI.org" || ev.Target != "pypi.org:443" ||
 		ev.ProxyStatus != 200 || ev.DstIP != "151.101.0.223" || ev.SrcPort == 0 {
 		t.Errorf("event %+v", ev)
 	}
@@ -402,5 +411,125 @@ func TestParseNoProxy(t *testing.T) {
 	}
 	if np, _, err := ParseNoProxy(""); err != nil || !np.Empty() {
 		t.Errorf("empty: %+v %v", np, err)
+	}
+}
+
+// fakeOrigin is a destination server for the direct (SNI check) mode. It
+// reports the first bytes of each connection, and answers anything that
+// starts like an HTTP request with 200 and the request line as body.
+type fakeOrigin struct {
+	addr  netip.AddrPort
+	first chan []byte
+}
+
+func newFakeOrigin(t *testing.T) *fakeOrigin {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	o := &fakeOrigin{addr: netip.MustParseAddrPort(ln.Addr().String()), first: make(chan []byte, 8)}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+				if b, _ := br.Peek(1); len(b) == 1 && b[0] != 0x16 {
+					for {
+						req, err := http.ReadRequest(br)
+						if err != nil {
+							return
+						}
+						line := req.Method + " " + req.RequestURI + " auth=" + req.Header.Get("Proxy-Authorization")
+						o.first <- []byte(line)
+						io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: "+strconv.Itoa(len(line))+"\r\n\r\n"+line)
+					}
+				}
+				buf := make([]byte, 64<<10)
+				n, _ := io.ReadAtLeast(br, buf, 1)
+				o.first <- buf[:n]
+			}()
+		}
+	}()
+	return o
+}
+
+func TestDirectTLSAllowed(t *testing.T) {
+	o := newFakeOrigin(t)
+	h := startRelay(t, nil, o.addr, Settings{AllowDomains: []string{"pypi.org"}, MaxConns: 4}, "")
+	sendClientHello(h.dial(t), "pypi.org")
+	select {
+	case got := <-o.first:
+		if len(got) == 0 || got[0] != 0x16 {
+			t.Fatalf("origin did not get the replayed ClientHello: % x", got[:min(8, len(got))])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing reached the origin")
+	}
+	ev := h.events(t, 1)[0]
+	if ev.Verdict != "allow" || ev.SNI != "pypi.org" || ev.Target != o.addr.String() || ev.ProxyStatus != 0 {
+		t.Errorf("event %+v", ev)
+	}
+}
+
+func TestDirectTLSSNIMismatch(t *testing.T) {
+	o := newFakeOrigin(t)
+	h := startRelay(t, nil, o.addr, Settings{AllowDomains: []string{"pypi.org"}, MaxConns: 4}, "pypi.org")
+	c := h.dial(t)
+	sendClientHello(c, "evil.test")
+	expectClosed(t, c)
+	if ev := h.events(t, 1)[0]; ev.Reason != ReasonSNIMismatch {
+		t.Errorf("event %+v", ev)
+	}
+	select {
+	case got := <-o.first:
+		t.Fatalf("origin got %q", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestDirectHTTP(t *testing.T) {
+	o := newFakeOrigin(t)
+	h := startRelay(t, nil, o.addr, Settings{AllowDomains: []string{"files.pythonhosted.org"}, MaxConns: 4}, "")
+	c := h.dial(t)
+	br := bufio.NewReader(c)
+	io.WriteString(c, "GET /simple/ HTTP/1.1\r\nHost: files.pythonhosted.org\r\nProxy-Authorization: Basic c2FuZGJveA==\r\n\r\n")
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(body) != "GET /simple/ auth=" {
+		t.Fatalf("response %d %q (want origin form, no proxy credentials)", resp.StatusCode, body)
+	}
+	io.WriteString(c, "GET / HTTP/1.1\r\nHost: evil.test\r\n\r\n")
+	if resp, err = http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("second request: %v %v", resp, err)
+	}
+	evs := h.events(t, 2)
+	if evs[0].Verdict != "allow" || evs[0].Target != o.addr.String() || evs[1].Reason != ReasonHostMismatch {
+		t.Errorf("events %+v", evs)
+	}
+}
+
+func TestDirectDialError(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := netip.MustParseAddrPort(ln.Addr().String())
+	ln.Close()
+	h := startRelay(t, nil, closed, Settings{AllowDomains: []string{"pypi.org"}, MaxConns: 4}, "")
+	c := h.dial(t)
+	sendClientHello(c, "pypi.org")
+	expectClosed(t, c)
+	if ev := h.events(t, 1)[0]; ev.Verdict != "deny" || ev.Reason != ReasonDialError {
+		t.Errorf("event %+v", ev)
 	}
 }

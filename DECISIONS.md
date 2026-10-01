@@ -37,7 +37,7 @@ The e2e harness instead puts the listener in its own netns `egattacker`, reached
 ### DNS proxy details
 - Set entry timeout is `max(min(TTL, 300), 60)` seconds per A record, so it always outlives the TTL the client caches.
 - HTTPS and SVCB queries for allowlisted names get an empty NOERROR, like AAAA.
-  Their address hints would point clients at IPs that never entered the allow set, and ECH configs would defeat the planned SNI check (S1).
+  Their address hints would point clients at IPs that never entered the allow set, and ECH configs would defeat the SNI check (S1).
   Clients fall back to A lookups.
 - If inserting into the allow set fails, the client gets SERVFAIL rather than an answer it cannot use.
 - Over-limit queries get REFUSED. Their log lines are themselves rate-limited, but metrics count every query.
@@ -238,7 +238,7 @@ The design also required the name to resolve, in this sandbox's DNS cache, to th
 A client that sends no SNI or Host (or a server-first protocol, after 1s of silence) gets the name the sandbox last resolved for the address, else the address, which the firewall already admitted.
 The ClientHello is parsed by `crypto/tls` (a server handshake aborted from `GetConfigForClient`), so hellos split across records or segments are read as a TLS server would read them; bytes that start like TLS but hold no parsable ClientHello are refused (`bad_client_hello`). The consumed bytes are replayed into the tunnel.
 This also closes a gap that direct mode has today: an IP learned for one allowlisted name on a shared CDN admits any SNI to that IP.
-The same relay could later enforce the planned SNI check (S1) in direct mode as well.
+The same relay enforces the SNI check (S1) in direct mode; see below.
 
 ### The proxy stays out of the sandbox's reach
 The proxy's address stays subject to `blocked_range` for sandbox traffic; only the egressd process talks to it.
@@ -293,3 +293,37 @@ It checks that allowlisted HTTP arrives in absolute form and TLS as `CONNECT <na
 With `REAL_PROXY` set it also fetches `https://pypi.org` through a real site proxy, on a host with no direct egress.
 Two more daemon runs check `no_proxy` by address and by name: the fetch reaches the origin without the proxy or the relay seeing it, allowed UDP is not rejected, and the direct set survives a restart with the same `no_proxy` but is reset when it changes.
 In the test the proxy shares the attacker address, which the test exempts from the blocked ranges; a real proxy on a private address stays blocked for sandboxes.
+
+## S1: SNI/Host check
+
+### The upstream-proxy relay, dialing directly
+The original design called for a TPROXY peek proxy on ports 443 and 80.
+The relay built for the upstream proxy already does the peeking (TLS ClientHello via `crypto/tls`, HTTP `Host` per request) and the allowlist decision, so S1 reuses it.
+Without a proxy, the relay connects to the original destination itself instead of sending a CONNECT, and splices the connection.
+It uses REDIRECT rather than TPROXY, for the reasons given under "REDIRECT, not TPROXY" above.
+
+`sbnat_<k>` redirects allowed TCP to ports 80 and 443 to the relay; `relay_redirect` (renamed from `proxy_redirect`, which the base ruleset deletes) dispatches to it whenever the relay is on.
+The `proxy` log event and `egressd_proxy_connects_total` became `relay` and `egressd_relay_connections_total`, since they now describe both modes.
+
+### On by default
+`daemon --sni-check` defaults to on, because the shared-CDN gap it closes is the most practical way around a domain allowlist.
+`--sni-check=false` restores plain forwarding.
+Costs: connections on ports 80 and 443 pass through a user-space splice, and they end when the daemon stops, while forwarded flows survive a restart.
+A destination that refuses the relay's connection shows up to the sandbox as an accepted connection that is then reset, logged as `dial_error`.
+
+### Decision rules
+Unchanged from proxy mode: an allowlisted SNI or Host passes; one that is not allowlisted is refused unless the original destination is inside `allow_cidrs`; a connection with no name (no SNI, an IP literal, a non-HTTP, non-TLS protocol) passes, since the firewall already admitted the address.
+The relay's outbound connection comes from the host, not from `10.200.k.2`; flow logs still come from the sandbox leg, whose conntrack entry keeps the original destination.
+
+### QUIC
+QUIC carries its server name in an encrypted Initial packet, so the relay cannot check it.
+With the SNI check on, UDP 443 to a DNS-learned address (not one inside `allow_cidrs`) is rejected with `icmpx admin-prohibited` and logged as `quic_blocked`; HTTP/3 clients fall back to TCP.
+
+### What it does not cover
+Ports other than 80 and 443 are forwarded unchecked; behind an upstream proxy every port goes through the relay.
+`no_proxy` destinations bypass the relay.
+The HTTP `Host` inside TLS is not visible without TLS interception, so domain fronting through an allowlisted SNI remains possible.
+
+### Testing
+`test/e2e/s1.sh` runs an HTTP endpoint on port 80 and a TCP hold server on 443 in the attacker netns.
+It checks allowed and refused Host and SNI, that flows are still logged on the sandbox leg, that QUIC to a DNS-learned address is rejected while other UDP is not, that other TCP ports are neither checked nor relayed, that the relay port is not reachable directly, and that `--sni-check=false` removes the redirect.

@@ -70,6 +70,10 @@ type Options struct {
 	UpstreamProxy *relay.Upstream
 	// NoProxy lists destinations that bypass UpstreamProxy.
 	NoProxy relay.NoProxy
+	// SNICheck sends allowed TCP to ports 80 and 443 through the relay,
+	// which checks the TLS SNI or HTTP Host against the allowlist. With an
+	// upstream proxy the relay sees all TCP anyway.
+	SNICheck bool
 	// FC locates firecracker and jailer for VM mode. VM mode is unavailable
 	// when either binary is unset.
 	FC      fc.Paths
@@ -261,6 +265,7 @@ func (mgr *Manager) ensureHost(ctx context.Context) error {
 		BlockedRanges: nft.DefaultBlockedRanges,
 		BlockedExempt: mgr.opts.BlockedExempt,
 		Proxy:         mgr.opts.UpstreamProxy != nil,
+		SNICheck:      mgr.opts.SNICheck,
 		DirectCIDRs:   mgr.opts.NoProxy.CIDRs,
 	})
 	if err := nft.Apply(ctx, base); err != nil {
@@ -499,7 +504,7 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 		return err
 	}
 	var rl *relay.Relay
-	if mgr.opts.UpstreamProxy != nil {
+	if mgr.relayed() {
 		rl = relay.New(relay.Config{
 			SandboxID: rec.ID,
 			Listen:    netip.AddrPortFrom(sb.HostAddr, addressing.RelayPort),
@@ -547,6 +552,7 @@ func (mgr *Manager) startVM(ctx context.Context, vm fc.VM, rec Record, pol *poli
 func (mgr *Manager) sandboxRules(k int, pol *policy.Policy, allowed, direct []nft.AllowEntry, preserve bool) nft.SandboxConfig {
 	return nft.SandboxConfig{
 		Proxied:         mgr.opts.UpstreamProxy != nil,
+		SNICheck:        mgr.opts.SNICheck,
 		Direct:          direct,
 		Index:           k,
 		AllowCIDRs:      pol.Egress.AllowCIDRs,
@@ -556,6 +562,9 @@ func (mgr *Manager) sandboxRules(k int, pol *policy.Policy, allowed, direct []nf
 		PreserveAllowed: preserve,
 	}
 }
+
+// relayed reports whether sandboxes get a relay.
+func (mgr *Manager) relayed() bool { return mgr.opts.UpstreamProxy != nil || mgr.opts.SNICheck }
 
 func relaySettings(pol *policy.Policy) relay.Settings {
 	cidrs := make([]netip.Prefix, 0, len(pol.Egress.AllowCIDRs))
@@ -568,7 +577,7 @@ func relaySettings(pol *policy.Policy) relay.Settings {
 }
 
 func (mgr *Manager) countRelay(id, result, reason string) {
-	mgr.m.ProxyConnects.WithLabelValues(id, result).Inc()
+	mgr.m.RelayConnections.WithLabelValues(id, result).Inc()
 	if reason != "" {
 		mgr.m.Denied.WithLabelValues(id, reason).Inc()
 	}

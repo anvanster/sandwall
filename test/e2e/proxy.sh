@@ -29,12 +29,12 @@ expect_eq "curl http://a.attacker.test succeeds" \
 expect_ok "proxy got an absolute-form request with egressd's credentials" \
 	grep -q "^GET http://a.attacker.test:$ATTACKER_PORT/ HTTP/1.1 auth=yes" "$PLOG"
 wait_log t1 "proxy event logged" \
-	".type==\"proxy\" and .verdict==\"allow\" and .http_host==\"a.attacker.test:$ATTACKER_PORT\" and .proxy_status==200"
+	".type==\"relay\" and .verdict==\"allow\" and .http_host==\"a.attacker.test:$ATTACKER_PORT\" and .proxy_status==200"
 wait_log t1 "flow attributed on the sandbox leg" \
 	".type==\"flow\" and .dst_ip==\"$A\" and .dst_port==$ATTACKER_PORT and .dst_domain==\"a.attacker.test\""
 expect_eq "Host not allowlisted gets 403 from the relay" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' -H 'Host: evil.test' "http://a.attacker.test:$ATTACKER_PORT/")" 403
-wait_log t1 "host_mismatch logged" '.type=="proxy" and .reason=="host_mismatch" and .http_host=="evil.test"'
+wait_log t1 "host_mismatch logged" '.type=="relay" and .reason=="host_mismatch" and .http_host=="evil.test"'
 expect_eq "sandbox cannot use the proxy as a proxy" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' -x "http://$A:$PROXY_PORT" http://evil.test/)" 403
 
@@ -43,13 +43,13 @@ log "TLS through the proxy"
 sbx t1 curl -sk -m 3 "https://a.attacker.test:$ATTACKER_HOLD_PORT/" >/dev/null 2>&1
 expect_ok "proxy got CONNECT by name" grep -q "^CONNECT a.attacker.test:$ATTACKER_HOLD_PORT HTTP/1.1 auth=yes" "$PLOG"
 wait_log t1 "SNI and target logged" \
-	".type==\"proxy\" and .verdict==\"allow\" and .sni==\"a.attacker.test\" and .target==\"a.attacker.test:$ATTACKER_HOLD_PORT\""
+	".type==\"relay\" and .verdict==\"allow\" and .sni==\"a.attacker.test\" and .target==\"a.attacker.test:$ATTACKER_HOLD_PORT\""
 expect_fail "non-allowlisted SNI to an allowed address fails" \
 	sbx t1 curl -sk -m 5 --resolve "evil.test:$ATTACKER_HOLD_PORT:$A" "https://evil.test:$ATTACKER_HOLD_PORT/"
-wait_log t1 "sni_mismatch logged" '.type=="proxy" and .reason=="sni_mismatch" and .sni=="evil.test"'
+wait_log t1 "sni_mismatch logged" '.type=="relay" and .reason=="sni_mismatch" and .sni=="evil.test"'
 expect_fail "proxy never saw evil.test" grep -q evil.test "$PLOG"
 expect_fail "proxy refusal reaches the sandbox" sbx t1 curl -sk -m 5 "https://blocked.attacker.test:$ATTACKER_HOLD_PORT/"
-wait_log t1 "proxy_refused logged with the proxy's status" '.type=="proxy" and .reason=="proxy_refused" and .proxy_status==403'
+wait_log t1 "proxy_refused logged with the proxy's status" '.type=="relay" and .reason=="proxy_refused" and .proxy_status==403'
 
 log "what the proxy does not change"
 expect_fail "relay port not reachable directly" sbx t1 curl -sS -m 3 "http://$relay_addr:15001/"
@@ -68,12 +68,12 @@ expect_eq "b.attacker.test resolves before the reload" "$(dns_status t1 b.attack
 expect_ok "reload: allow only b.attacker.test" egressd policy apply t1 "$P/proxy-reload.yaml"
 expect_fail "a.attacker.test now refused by the relay" \
 	sbx t1 curl -sk -m 5 --resolve "a.attacker.test:$ATTACKER_HOLD_PORT:$A" "https://a.attacker.test:$ATTACKER_HOLD_PORT/"
-wait_log t1 "sni_mismatch after reload" '.type=="proxy" and .reason=="sni_mismatch" and .sni=="a.attacker.test"'
+wait_log t1 "sni_mismatch after reload" '.type=="relay" and .reason=="sni_mismatch" and .sni=="a.attacker.test"'
 expect_eq "b.attacker.test still works" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
 
 log "metrics and restart"
-expect_ok "proxy connects counted" bash -c "curl -s http://127.0.0.1:19464/metrics | grep -q 'egressd_proxy_connects_total{result=\"ok\",sandbox=\"t1\"}'"
+expect_ok "relay connections counted" bash -c "curl -s http://127.0.0.1:19464/metrics | grep -q 'egressd_relay_connections_total{result=\"ok\",sandbox=\"t1\"}'"
 stop_daemon
 start_daemon "${PROXY_FLAGS[@]}" || exit 1
 expect_eq "relay serves again after a daemon restart" \
@@ -89,12 +89,12 @@ direct_set() { nft -j list set inet egressd "direct_$k" | jq -r '[.nftables[].se
 direct_ok() {
 	local plines relayed udp_rejects
 	plines=$(wc -l <"$PLOG")
-	relayed=$(count_events t1 '.type=="proxy"')
+	relayed=$(count_events t1 '.type=="relay"')
 	udp_rejects=$(count_events t1 '.reason=="no_proxy_route"')
 	expect_eq "$1: curl succeeds" \
 		"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
 	expect_eq "$1: the proxy saw nothing" "$(wc -l <"$PLOG")" "$plines"
-	expect_eq "$1: the relay saw nothing" "$(count_events t1 '.type=="proxy"')" "$relayed"
+	expect_eq "$1: the relay saw nothing" "$(count_events t1 '.type=="relay"')" "$relayed"
 	sbx t1 bash -c "echo x >/dev/udp/$A/9999"
 	sleep 1
 	expect_eq "$1: allowed UDP not rejected" "$(count_events t1 '.reason=="no_proxy_route"')" "$udp_rejects"
@@ -130,7 +130,7 @@ if [[ -n "${REAL_PROXY:-}" ]]; then
 	start_daemon --upstream-proxy "$REAL_PROXY" || exit 1
 	expect_ok "create sandbox r1" egressd sandbox create r1 --policy "$P/m1.yaml"
 	expect_eq "curl https://pypi.org succeeds" "$(sbx r1 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/)" 200
-	wait_log r1 "CONNECT pypi.org:443 logged" '.type=="proxy" and .verdict=="allow" and .target=="pypi.org:443" and .proxy_status==200'
+	wait_log r1 "CONNECT pypi.org:443 logged" '.type=="relay" and .verdict=="allow" and .target=="pypi.org:443" and .proxy_status==200'
 	expect_eq "dig example.com is REFUSED" "$(dns_status r1 example.com)" REFUSED
 	expect_fail "curl https://example.com fails" sbx r1 curl -sS -m 5 https://example.com/
 fi

@@ -20,10 +20,11 @@ const (
 	TypeDNS  = "dns"
 	TypeDeny = "deny"
 	TypeFlow = "flow"
-	// TypeProxy records one decision of the upstream-proxy relay: a
-	// connection or HTTP request carried through the proxy (verdict allow)
-	// or refused by the relay or the proxy (verdict deny, with a reason).
-	TypeProxy = "proxy"
+	// TypeRelay records one decision of the relay (SNI/Host check and
+	// upstream proxy): a connection or HTTP request carried on (verdict
+	// allow) or refused by the relay, the proxy or the destination
+	// (verdict deny, with a reason).
+	TypeRelay = "relay"
 )
 
 // Event is one JSONL log line. Fields irrelevant to a type are omitted.
@@ -51,9 +52,9 @@ type Event struct {
 	BytesOut uint64     `json:"bytes_out,omitempty"`
 	BytesIn  uint64     `json:"bytes_in,omitempty"`
 
-	// Proxy
+	// Relay
 	SrcPort     uint16 `json:"src_port,omitempty"`
-	Target      string `json:"target,omitempty"` // CONNECT target or absolute-form request host
+	Target      string `json:"target,omitempty"` // CONNECT target, absolute-form request host, or dialed address
 	SNI         string `json:"sni,omitempty"`
 	HTTPHost    string `json:"http_host,omitempty"`
 	ProxyStatus int    `json:"proxy_status,omitempty"`
@@ -62,7 +63,7 @@ type Event struct {
 
 // IsDenial reports whether an event records something the policy blocked.
 func (e *Event) IsDenial() bool {
-	return e.Type == TypeDeny || ((e.Type == TypeDNS || e.Type == TypeProxy) && e.Verdict != "allow")
+	return e.Type == TypeDeny || ((e.Type == TypeDNS || e.Type == TypeRelay) && e.Verdict != "allow")
 }
 
 // Path returns the log file for a sandbox.

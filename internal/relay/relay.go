@@ -1,10 +1,12 @@
-// Package relay carries a proxied sandbox's allowed TCP connections to an
-// upstream HTTP proxy. The sandbox connects to the real destination; the
-// host firewall applies the sandbox policy and then REDIRECTs the
-// connection to this relay, one per sandbox on 10.200.k.1. The relay
-// recovers the original destination, picks the name to ask the proxy for
-// (TLS SNI, HTTP Host, or the DNS-learned name), checks it against the
-// allowlist, and tunnels the connection through the proxy.
+// Package relay checks the name a sandbox presents (TLS SNI or HTTP Host)
+// on its allowed TCP connections, and carries them on. The sandbox connects
+// to the real destination; the host firewall applies the sandbox policy and
+// then REDIRECTs the connection to this relay, one per sandbox on
+// 10.200.k.1. The relay recovers the original destination, checks the name
+// against the allowlist, and then
+//   - with an upstream HTTP proxy, tunnels the connection through it, asking
+//     for the name (or the DNS-learned name, or the address);
+//   - without one (the SNI check), dials the original destination itself.
 //
 // The proxy only ever receives targets that are allowlisted names or
 // addresses inside the policy's allow_cidrs (or addresses the firewall
@@ -38,6 +40,9 @@ const (
 	ReasonBadClientHello = "bad_client_hello"
 	ReasonProxyRefused   = "proxy_refused"
 	ReasonProxyError     = "proxy_error"
+	// ReasonDialError: without an upstream proxy, the original destination
+	// did not accept the relay's connection.
+	ReasonDialError = "dial_error"
 )
 
 // Results counted per relay decision.
@@ -66,7 +71,9 @@ type Settings struct {
 type Config struct {
 	SandboxID string
 	Listen    netip.AddrPort
-	Upstream  *Upstream
+	// Upstream is the HTTP proxy to carry connections through; nil dials
+	// the original destination directly.
+	Upstream *Upstream
 	// Domain returns the allowlisted name the sandbox last resolved to an
 	// address, or "".
 	Domain func(netip.Addr) string
@@ -288,13 +295,27 @@ func (r *Relay) tunnel(c *net.TCPConn, br *bufio.Reader, prefix []byte, dst neti
 		reset(c)
 		return
 	}
-	ev.Target = net.JoinHostPort(host, strconv.Itoa(int(dst.Port())))
+	var (
+		up     net.Conn
+		upR    io.Reader
+		status int
+		err    error
+	)
 	start := time.Now()
-	up, upBr, status, err := r.cfg.Upstream.Connect(r.ctx, ev.Target)
+	if r.cfg.Upstream == nil {
+		ev.Target = dst.String()
+		up, err = r.dialDirect(dst)
+		upR = up
+	} else {
+		ev.Target = net.JoinHostPort(host, strconv.Itoa(int(dst.Port())))
+		var br *bufio.Reader
+		up, br, status, err = r.cfg.Upstream.Connect(r.ctx, ev.Target)
+		upR = br
+	}
 	ev.ConnectMS = time.Since(start).Milliseconds()
 	ev.ProxyStatus = status
 	if err != nil {
-		r.proxyFailed(ev, status, err)
+		r.upstreamFailed(ev, status, err)
 		reset(c)
 		return
 	}
@@ -307,12 +328,20 @@ func (r *Relay) tunnel(c *net.TCPConn, br *bufio.Reader, prefix []byte, dst neti
 		}
 	}
 	r.allowed(ev)
-	splice(c, br, up.(*net.TCPConn), upBr)
+	splice(c, br, up.(*net.TCPConn), upR)
 }
 
-// serveHTTP forwards plain HTTP/1.x requests to the proxy in absolute form,
-// checking the Host of every request. Proxies commonly allow CONNECT only
-// to port 443, so plain HTTP is not tunnelled.
+// dialDirect connects to the original destination from the host. The
+// firewall already admitted dst for this sandbox.
+func (r *Relay) dialDirect(dst netip.AddrPort) (net.Conn, error) {
+	d := net.Dialer{Timeout: dialTimeout}
+	return d.DialContext(r.ctx, "tcp4", dst.String())
+}
+
+// serveHTTP forwards plain HTTP/1.x requests, checking the Host of every
+// request: to the proxy in absolute form (proxies commonly allow CONNECT
+// only to port 443, so plain HTTP is not tunnelled), or without a proxy to
+// the original destination as they came.
 func (r *Relay) serveHTTP(c *net.TCPConn, br *bufio.Reader, dst netip.AddrPort, base flowlog.Event) {
 	var (
 		up   net.Conn
@@ -341,37 +370,53 @@ func (r *Relay) serveHTTP(c *net.TCPConn, br *bufio.Reader, dst netip.AddrPort, 
 			writeStatus(c, http.StatusForbidden)
 			return
 		}
+		direct := r.cfg.Upstream == nil
 		ev.Target = host
-		if dst.Port() != 80 {
+		if direct {
+			ev.Target = dst.String()
+		} else if dst.Port() != 80 {
 			ev.Target = net.JoinHostPort(host, strconv.Itoa(int(dst.Port())))
 		}
 		start := time.Now()
 		if up == nil {
-			if up, err = r.cfg.Upstream.Dial(r.ctx); err != nil {
-				r.proxyFailed(ev, 0, err)
+			if direct {
+				up, err = r.dialDirect(dst)
+			} else {
+				up, err = r.cfg.Upstream.Dial(r.ctx)
+			}
+			if err != nil {
+				r.upstreamFailed(ev, 0, err)
 				writeStatus(c, http.StatusBadGateway)
 				return
 			}
 			upBr = bufio.NewReader(up)
 			defer context.AfterFunc(r.ctx, func() { up.Close() })()
 		}
-		req.URL.Scheme, req.URL.Host = "http", ev.Target
 		req.Header.Del("Proxy-Authorization")
 		req.Header.Del("Proxy-Connection")
-		if a := r.cfg.Upstream.auth; a != "" {
-			req.Header.Set("Proxy-Authorization", a)
+		if direct {
+			err = req.Write(up)
+		} else {
+			req.URL.Scheme, req.URL.Host = "http", ev.Target
+			if a := r.cfg.Upstream.auth; a != "" {
+				req.Header.Set("Proxy-Authorization", a)
+			}
+			err = req.WriteProxy(up)
 		}
-		if err := req.WriteProxy(up); err != nil {
-			r.proxyFailed(ev, 0, err)
+		if err != nil {
+			r.upstreamFailed(ev, 0, err)
 			return
 		}
 		resp, err := readFinalResponse(upBr, req, c)
 		if err != nil {
-			r.proxyFailed(ev, 0, err)
+			r.upstreamFailed(ev, 0, err)
 			writeStatus(c, http.StatusBadGateway)
 			return
 		}
-		ev.ProxyStatus, ev.ConnectMS = resp.StatusCode, time.Since(start).Milliseconds()
+		if !direct {
+			ev.ProxyStatus = resp.StatusCode
+		}
+		ev.ConnectMS = time.Since(start).Milliseconds()
 		r.allowed(ev)
 		if resp.StatusCode == http.StatusSwitchingProtocols {
 			if err := resp.Write(c); err != nil {
@@ -406,7 +451,7 @@ func readFinalResponse(br *bufio.Reader, req *http.Request, client io.Writer) (*
 }
 
 func (r *Relay) baseEvent(c *net.TCPConn, dst netip.AddrPort) flowlog.Event {
-	ev := flowlog.Event{Type: flowlog.TypeProxy, SandboxID: r.cfg.SandboxID, Proto: "tcp"}
+	ev := flowlog.Event{Type: flowlog.TypeRelay, SandboxID: r.cfg.SandboxID, Proto: "tcp"}
 	if src, ok := c.RemoteAddr().(*net.TCPAddr); ok {
 		ev.SrcPort = uint16(src.Port)
 	}
@@ -429,15 +474,18 @@ func (r *Relay) deny(ev flowlog.Event, reason string) {
 	r.count(ResultDenied, reason)
 }
 
-func (r *Relay) proxyFailed(ev flowlog.Event, status int, err error) {
+func (r *Relay) upstreamFailed(ev flowlog.Event, status int, err error) {
 	reason, result := ReasonProxyError, ResultError
-	if status != 0 {
+	switch {
+	case r.cfg.Upstream == nil:
+		reason = ReasonDialError
+	case status != 0:
 		reason, result = ReasonProxyRefused, ResultRefused
 	}
 	ev.Verdict, ev.Reason = "deny", reason
 	r.cfg.Sink.Write(ev)
 	r.count(result, reason)
-	r.cfg.Log.Debug("relay: upstream proxy failed", "sandbox", r.cfg.SandboxID, "target", ev.Target, "err", err)
+	r.cfg.Log.Debug("relay: upstream connection failed", "sandbox", r.cfg.SandboxID, "target", ev.Target, "err", err)
 }
 
 func (r *Relay) count(result, reason string) {
