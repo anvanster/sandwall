@@ -25,6 +25,10 @@ var (
 	GuestAddr = netip.MustParseAddr("172.16.0.2")
 )
 
+// RelayPort is where each sandbox's upstream-proxy relay listens, on the
+// sandbox's host-side address.
+const RelayPort = 15001
+
 // TapName is the tap device name inside every VM-mode netns.
 const TapName = "tap0"
 

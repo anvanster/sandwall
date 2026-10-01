@@ -44,7 +44,7 @@ egressd logs agent --deny-only:
                               veth-s<k>  ⇄  veth-h<k>   (host netns)
                                                 │
                      host nftables: table inet egressd
-                       forward → sb_<k>     (policy for traffic leaving the host)
+                       prerouting → sb_<k>  (policy for traffic leaving the host)
                        input   → sbin_<k>   (only DNS to this sandbox's proxy)
                        postrouting: masquerade to the uplink
                                                 ▼
@@ -102,6 +102,21 @@ sudo bin/egressd vm clone /srv/snapshots/base --count 20 --policy demo/policy.ya
 Each VM runs as `jailer --netns /var/run/netns/sb<k>` under its own unprivileged uid, and the guest network comes from the kernel command line (`ip=172.16.0.2::172.16.0.1:255.255.255.252::eth0:off`).
 Bandwidth limits are applied both by tc on the host and by Firecracker's own rate limiters.
 
+### Behind an HTTP proxy
+
+On networks where only an HTTP proxy reaches the internet, start the daemon with `--upstream-proxy http://[user:pass@]host:port`, or `--upstream-proxy-from-env` to take it from `https_proxy`/`http_proxy` (`sudo` drops those unless preserved, e.g. `sudo --preserve-env=https_proxy,http_proxy`).
+The proxy is a next hop, not a destination: the sandbox needs no proxy settings and still connects to real addresses, and egressd still applies the policy to them.
+Allowed TCP is then redirected to a per-sandbox relay on `10.200.k.1:15001`, which tunnels it through the proxy:
+
+- TLS: `CONNECT <SNI>:<port>`. The SNI must be allowlisted (or the address inside `allow_cidrs`), otherwise the connection is reset and logged as `sni_mismatch`.
+- Plain HTTP: each request is forwarded in absolute form, and every request's `Host` is checked (`host_mismatch`, answered with 403).
+- Other TCP: `CONNECT` with the name the sandbox resolved for that address.
+- UDP to an allowed address is rejected (`no_proxy_route`), so HTTP/3 clients fall back to TCP.
+
+The sandbox cannot reach the proxy itself, and proxy credentials never enter it.
+Connections through the relay end when the daemon stops, unlike forwarded flows.
+`no_proxy` is not supported yet: every allowed destination goes through the proxy.
+
 ## Policy reference
 
 ```yaml
@@ -136,6 +151,7 @@ Rule order for traffic leaving the host:
 8. Everything else is dropped (`not_allowed`).
 
 Traffic to the host itself is dropped (`host_access`), except DNS to the sandbox's own proxy.
+With an upstream proxy, step 7 accepts only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
 
 ## Observability
 
@@ -147,6 +163,7 @@ Logs outlive the sandbox.
 | `dns` | `qname`, `qtype`, `verdict` (`allow`, `refused`, `ratelimited`, `error`), `answers` |
 | `flow` | `proto`, `dst_ip`, `dst_port`, `dst_domain`, `bytes_out`, `bytes_in`, `ts_start`, `ts_end` |
 | `deny` | `reason`, `proto`, `dst_ip`, `dst_port` |
+| `proxy` | upstream proxy mode: `src_port`, `dst_ip`, `dst_port`, `dst_domain`, `target`, `sni`, `http_host`, `proxy_status`, `connect_ms`; on `deny`, `reason` (`sni_mismatch`, `host_mismatch`, `bad_client_hello`, `proxy_refused`, `proxy_error`, `conn_limit`) |
 
 Every line also has `ts`, `sandbox_id` and `verdict`.
 Flow byte counts come from conntrack and are layer 3 (they include IP and TCP headers).
@@ -160,6 +177,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 | `egressd_bytes_total` | `direction` (`out` = sandbox to world) |
 | `egressd_dns_queries_total` | `verdict` |
 | `egressd_denied_total` | `reason` |
+| `egressd_proxy_connects_total` | `result` (`ok`, `denied`, `refused`, `error`) |
 
 ## Threat model
 
@@ -174,6 +192,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 **What it guarantees:**
 
 - No connection leaves the host unless its destination was returned by an allowlisted DNS answer or is in `allow_cidrs`.
+  Behind an upstream proxy, the proxy is only ever asked for allowlisted names, addresses in `allow_cidrs`, or addresses the firewall already admitted.
 - No DNS query for a name that is not allowlisted reaches any resolver.
 - Policy is enforced fail-closed. A sandbox interface without rules is dropped, and while the daemon is down nothing answers the sandbox's DNS.
 
@@ -181,7 +200,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 
 ## Known gaps
 
-- **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, it is reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup). A planned SNI/Host check closes this for TLS and HTTP.
+- **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, it is reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup). Behind an upstream proxy, the relay's SNI/Host check closes this for TLS and HTTP; direct mode still has the gap. Neither mode sees an HTTP `Host` inside TLS, so fronting through an allowlisted SNI remains possible.
 - **Allowlisted names are an exfiltration channel if their owner is hostile.** A wildcard such as `*.example.com` lets the sandbox query any subdomain, and those queries do reach `example.com`'s nameservers. Only allowlist zones you trust.
 - **Connection-limit recovery is lazy.** The kernel's `ct count` prunes closed and rejected connections only when new ones are attempted. Right after a burst, the limit can be stricter than configured for a few seconds. It never lets more connections through.
 - **No IPv6.** It is disabled inside sandboxes. AAAA, HTTPS and SVCB queries get empty answers, so clients fall back to IPv4.
@@ -194,11 +213,13 @@ Design decisions and deviations from the original plan, with the measurements be
 ```sh
 make test         # unit tests: policy parsing, allowlist matching, DNS proxy, golden nftables rulesets
 make vet fmt-check
-make e2e          # root-only acceptance tests for M1-M3 (M3 needs /dev/kvm); run in a disposable VM
+make e2e          # root-only acceptance tests for M1-M3 and proxy mode (M3 needs /dev/kvm); run in a disposable VM
+make e2e-proxy REAL_PROXY=http://host:port   # also fetch real sites through a site proxy
 ```
 
 Every e2e script starts and ends with `egressd nuke`, uses its own state and log directories, and checks that nothing egressd created is left behind.
-The "attacker" endpoint is a local listener in its own netns at `10.99.0.1`, so only the allowlist checks need the internet.
+The "attacker" endpoint is a local listener in its own netns at `10.99.0.1`, so only the allowlist checks need the internet; the proxy test runs a fake upstream proxy there too.
+VM-mode paths are configurable for keeping snapshots and jails on one (reflink-capable) filesystem: `make e2e-m3 FC_ASSETS=… CHROOT_BASE=… E2E_TMP=…`.
 
 The demos are `demo/exfil.sh` (the comparison above) and `demo/clones.sh` (20 Firecracker clones with a live, merged `egressd logs -f`).
 On nested-virtualization hosts, such as a Lima VM on Apple silicon, start many VMs with `vm clone --stagger 1s`; see DECISIONS.md.

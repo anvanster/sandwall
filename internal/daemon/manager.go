@@ -30,6 +30,7 @@ import (
 	"github.com/anvanster/egressd/internal/netns"
 	"github.com/anvanster/egressd/internal/nft"
 	"github.com/anvanster/egressd/internal/policy"
+	"github.com/anvanster/egressd/internal/relay"
 	"github.com/anvanster/egressd/internal/shaper"
 )
 
@@ -64,6 +65,9 @@ type Options struct {
 	BlockedExempt []netip.Prefix
 	// DefaultUpstream is used when a policy has no upstream_dns.
 	DefaultUpstream string
+	// UpstreamProxy, when set, carries every sandbox's allowed TCP through
+	// this HTTP proxy instead of forwarding it to the uplink.
+	UpstreamProxy *relay.Upstream
 	// FC locates firecracker and jailer for VM mode. VM mode is unavailable
 	// when either binary is unset.
 	FC      fc.Paths
@@ -112,6 +116,15 @@ type sandbox struct {
 	addr   addressing.Sandbox
 	policy *policy.Policy
 	proxy  *dnsproxy.Proxy
+	relay  *relay.Relay // nil without an upstream proxy
+}
+
+// stop closes the sandbox's DNS proxy and relay listeners.
+func (s *sandbox) stop() {
+	s.proxy.Stop()
+	if s.relay != nil {
+		s.relay.Stop()
+	}
 }
 
 // Manager creates, reloads and destroys sandboxes.
@@ -209,7 +222,11 @@ func (mgr *Manager) ensureHost(ctx context.Context) error {
 	if err := netns.EnableHostSysctls(mgr.sysctlFile()); err != nil {
 		return fmt.Errorf("host sysctls: %w", err)
 	}
-	base := nft.RenderBase(nft.BaseConfig{BlockedRanges: nft.DefaultBlockedRanges, BlockedExempt: mgr.opts.BlockedExempt})
+	base := nft.RenderBase(nft.BaseConfig{
+		BlockedRanges: nft.DefaultBlockedRanges,
+		BlockedExempt: mgr.opts.BlockedExempt,
+		Proxy:         mgr.opts.UpstreamProxy != nil,
+	})
 	if err := nft.Apply(ctx, base); err != nil {
 		return fmt.Errorf("base ruleset: %w", err)
 	}
@@ -420,7 +437,7 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 			return err
 		}
 	}
-	script, err := nft.RenderSandbox(sandboxRules(sb.Index, pol, nil, restoring))
+	script, err := nft.RenderSandbox(mgr.sandboxRules(sb.Index, pol, nil, restoring))
 	if err != nil {
 		return err
 	}
@@ -442,7 +459,24 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 		_ = mgr.sink.Close(rec.ID)
 		return err
 	}
-	s := &sandbox{rec: rec, addr: sb, policy: pol, proxy: proxy}
+	var rl *relay.Relay
+	if mgr.opts.UpstreamProxy != nil {
+		rl = relay.New(relay.Config{
+			SandboxID: rec.ID,
+			Listen:    netip.AddrPortFrom(sb.HostAddr, addressing.RelayPort),
+			Upstream:  mgr.opts.UpstreamProxy,
+			Domain:    proxy.Domain,
+			Sink:      mgr.sink,
+			Count:     mgr.countRelay,
+			Log:       mgr.log,
+		}, relaySettings(pol))
+		if err := rl.Start(); err != nil {
+			proxy.Stop()
+			_ = mgr.sink.Close(rec.ID)
+			return err
+		}
+	}
+	s := &sandbox{rec: rec, addr: sb, policy: pol, proxy: proxy, relay: rl}
 	mgr.mu.Lock()
 	mgr.byID[rec.ID] = s
 	mgr.byIndex[sb.Index] = s
@@ -471,14 +505,32 @@ func (mgr *Manager) startVM(ctx context.Context, vm fc.VM, rec Record, pol *poli
 	return vm.Boot(ctx, cfg, vmLimits(pol))
 }
 
-func sandboxRules(k int, pol *policy.Policy, allowed []nft.AllowEntry, preserve bool) nft.SandboxConfig {
+func (mgr *Manager) sandboxRules(k int, pol *policy.Policy, allowed []nft.AllowEntry, preserve bool) nft.SandboxConfig {
 	return nft.SandboxConfig{
+		Proxied:         mgr.opts.UpstreamProxy != nil,
 		Index:           k,
 		AllowCIDRs:      pol.Egress.AllowCIDRs,
 		MaxConns:        pol.Limits.MaxConns,
 		NewConnsPerSec:  pol.Limits.NewConnsPerSec,
 		Allowed:         allowed,
 		PreserveAllowed: preserve,
+	}
+}
+
+func relaySettings(pol *policy.Policy) relay.Settings {
+	cidrs := make([]netip.Prefix, 0, len(pol.Egress.AllowCIDRs))
+	for _, c := range pol.Egress.AllowCIDRs {
+		if p, err := netip.ParsePrefix(c); err == nil {
+			cidrs = append(cidrs, p.Masked())
+		}
+	}
+	return relay.Settings{AllowDomains: pol.Egress.AllowDomains, AllowCIDRs: cidrs, MaxConns: pol.Limits.MaxConns}
+}
+
+func (mgr *Manager) countRelay(id, result, reason string) {
+	mgr.m.ProxyConnects.WithLabelValues(id, result).Inc()
+	if reason != "" {
+		mgr.m.Denied.WithLabelValues(id, reason).Inc()
 	}
 }
 
@@ -520,7 +572,7 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 		return Info{}, err
 	}
 	err = s.proxy.Reload(mgr.proxySettings(pol), func(live []nft.AllowEntry) error {
-		script, err := nft.RenderSandbox(sandboxRules(s.addr.Index, pol, live, false))
+		script, err := nft.RenderSandbox(mgr.sandboxRules(s.addr.Index, pol, live, false))
 		if err != nil {
 			return err
 		}
@@ -530,6 +582,9 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 		// Put the proxy back on the old policy; the nft transaction was atomic.
 		_ = s.proxy.Reload(mgr.proxySettings(s.policy), func([]nft.AllowEntry) error { return nil })
 		return Info{}, err
+	}
+	if s.relay != nil {
+		s.relay.Reload(relaySettings(pol))
 	}
 	if err := shaper.Apply(ctx, s.addr, shapeLimits(pol)); err != nil {
 		return Info{}, fmt.Errorf("policy applied to firewall and DNS but not to tc: %w", err)
@@ -593,7 +648,7 @@ func (mgr *Manager) destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	s.proxy.Stop()
+	s.stop()
 	mgr.unregister(id, s.addr.Index)
 	err = mgr.teardown(ctx, id, s.addr)
 	_ = mgr.sink.Close(id)
@@ -634,7 +689,7 @@ func (mgr *Manager) Nuke(ctx context.Context) error {
 	mgr.byIndex = map[int]*sandbox{}
 	mgr.mu.Unlock()
 	for id, s := range all {
-		s.proxy.Stop()
+		s.stop()
 		_ = mgr.sink.Close(id)
 		mgr.m.Forget(id)
 	}
@@ -687,7 +742,7 @@ func (mgr *Manager) unregister(id string, k int) {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 	if s, ok := mgr.byID[id]; ok {
-		s.proxy.Stop()
+		s.stop()
 	}
 	delete(mgr.byID, id)
 	delete(mgr.byIndex, k)
@@ -744,14 +799,14 @@ func (mgr *Manager) Domain(k int, ip netip.Addr) string {
 // Sink exposes the event sink for collectors.
 func (mgr *Manager) Sink() *flowlog.Sink { return mgr.sink }
 
-// Close stops DNS listeners and closes logs. Sandboxes, including running
+// Close stops DNS and relay listeners and closes logs. Sandboxes, including running
 // VMs, keep existing and are restored by the next daemon start; without
 // the proxy their DNS fails closed.
 func (mgr *Manager) Close() {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 	for _, s := range mgr.byID {
-		s.proxy.Stop()
+		s.stop()
 	}
 	mgr.sink.CloseAll()
 }

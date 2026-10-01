@@ -5,8 +5,10 @@
 //
 //	table inet egressd
 //	  set blocked_ranges, blocked_exempt        (global, interval)
-//	  map fwd_vmap, in_vmap                     (ifname -> jump sb_<k> / sbin_<k>)
-//	  chain forward     (hook)  iifname vmap @fwd_vmap; unknown veth-h* drop
+//	  map pre_vmap, in_vmap                     (ifname -> jump sb_<k> / sbin_<k>)
+//	  chain prerouting  (hook)  host-bound traffic to input; iifname vmap @pre_vmap; unknown veth-h* drop
+//	  chain proxy_redirect (hook, nat) with an upstream proxy: allowed TCP to the sandbox's relay
+//	  chain forward     (hook)  nothing reaches a sandbox but replies
 //	  chain input       (hook)  iifname vmap @in_vmap;  unknown veth-h* drop
 //	  chain postrouting (hook)  masquerade sandbox traffic leaving the host
 //	  chain sb_<k>      per-sandbox egress policy
@@ -48,7 +50,14 @@ const (
 	ReasonHostAccess   = "host_access"
 	ReasonIPv6         = "ipv6"
 	ReasonUnknownIface = "unknown_iface"
+	// ReasonNoProxyRoute: allowed non-TCP traffic from a proxied sandbox,
+	// which an HTTP proxy cannot carry.
+	ReasonNoProxyRoute = "no_proxy_route"
 )
+
+// PreroutingPriority runs sandbox policy after conntrack (-200) and before
+// the proxy redirect (dstnat, -100).
+const PreroutingPriority = -150
 
 // DefaultBlockedRanges are never reachable from a sandbox,
 // plus reserved 240/4 which also covers the limited broadcast address.
@@ -70,6 +79,9 @@ type BaseConfig struct {
 	// BlockedExempt carves holes in BlockedRanges. Intended for test
 	// endpoints only; the transfer supernet stays blocked regardless.
 	BlockedExempt []netip.Prefix
+	// Proxy redirects allowed sandbox TCP to the per-sandbox relay on
+	// addressing.RelayPort instead of forwarding it.
+	Proxy bool
 }
 
 // SandboxConfig is the per-sandbox part of the ruleset.
@@ -83,6 +95,9 @@ type SandboxConfig struct {
 	// PreserveAllowed keeps allow_<k> as is instead of flushing it. Used
 	// when a restarted daemon re-adopts a running sandbox.
 	PreserveAllowed bool
+	// Proxied matches BaseConfig.Proxy: allowed TCP goes to the relay, and
+	// other allowed traffic is rejected because the proxy cannot carry it.
+	Proxied bool
 }
 
 // AllowEntry is one DNS-learned address and how long it stays allowed.
@@ -131,7 +146,7 @@ func (b *builder) declareBase() {
 	b.line("add table inet %s", t)
 	b.line("add set inet %s blocked_ranges { type ipv4_addr; flags interval; auto-merge; }", t)
 	b.line("add set inet %s blocked_exempt { type ipv4_addr; flags interval; auto-merge; }", t)
-	b.line("add map inet %s fwd_vmap { type ifname : verdict; }", t)
+	b.line("add map inet %s pre_vmap { type ifname : verdict; }", t)
 	b.line("add map inet %s in_vmap { type ifname : verdict; }", t)
 	// TCP gets a reset: ICMP errors are rate-limited per destination by the
 	// kernel (net.ipv4.icmp_ratelimit), which turns most rejects of a
@@ -157,10 +172,30 @@ func RenderBase(cfg BaseConfig) string {
 		b.line("add element inet %s blocked_exempt { %s }", t, joinPrefixes(cfg.BlockedExempt))
 	}
 
+	// Sandbox policy runs in prerouting, not forward: a proxy redirect
+	// turns allowed traffic into input traffic, which forward never sees.
+	// Traffic to the host itself is left to input and sbin_<k>, as before.
+	b.line("add chain inet %s prerouting { type filter hook prerouting priority %d; policy accept; }", t, PreroutingPriority)
+	b.line("flush chain inet %s prerouting", t)
+	b.line("add rule inet %s prerouting iifname \"veth-h*\" fib daddr type { local, broadcast, multicast } accept", t)
+	b.line("add rule inet %s prerouting iifname vmap @pre_vmap", t)
+	b.line("add rule inet %s prerouting iifname \"veth-h*\" %s", t, logDrop(0, ReasonUnknownIface))
+
+	b.line("add chain inet %s proxy_redirect { type nat hook prerouting priority dstnat; policy accept; }", t)
+	b.line("flush chain inet %s proxy_redirect", t)
+	if cfg.Proxy {
+		// Only traffic sb_<k> accepted gets here. The redirect target is
+		// the incoming interface's address, 10.200.k.1, where sandbox k's
+		// relay listens.
+		b.line("add rule inet %s proxy_redirect iifname \"veth-h*\" meta l4proto tcp fib daddr type != local redirect to :%d",
+			t, addressing.RelayPort)
+	}
+
 	b.line("add chain inet %s forward { type filter hook forward priority filter; policy accept; }", t)
 	b.line("flush chain inet %s forward", t)
-	b.line("add rule inet %s forward iifname vmap @fwd_vmap", t)
-	b.line("add rule inet %s forward iifname \"veth-h*\" %s", t, logDrop(0, ReasonUnknownIface))
+	// fwd_vmap dispatched policy from forward before it moved to prerouting.
+	b.line("add map inet %s fwd_vmap { type ifname : verdict; }", t)
+	b.line("delete map inet %s fwd_vmap", t)
 	b.line("add rule inet %s forward oifname \"veth-h*\" ct state established,related accept", t)
 	b.line("add rule inet %s forward oifname \"veth-h*\" counter drop", t)
 
@@ -220,8 +255,8 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	chain := fmt.Sprintf("add rule inet %s sb_%d", t, k)
 	// 1. Return traffic for flows already admitted.
 	b.line("%s ct state established,related accept", chain)
-	// 2. DNS to the sandbox's own proxy. The proxy address is host-local, so
-	//    this traffic is actually admitted by sbin_<k>; kept so the chain reads as a complete policy.
+	// 2. DNS to the sandbox's own proxy. Host-bound traffic skips this chain
+	//    and is admitted by sbin_<k>; kept so the chain reads as a complete policy.
 	b.line("%s ip daddr %s meta l4proto { tcp, udp } th dport 53 accept", chain, sb.HostAddr)
 	// 3. Any other DNS or DoT is a bypass attempt.
 	b.line("%s meta l4proto { tcp, udp } th dport { 53, 853 } %s", chain, logDrop(k, ReasonDNSBypass))
@@ -237,17 +272,34 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	b.line("%s ct state new ct count over %d counter log group %d prefix %q jump conn_reject",
 		chain, cfg.MaxConns, LogGroup, LogPrefix(k, ReasonConnLimit))
 	// 7-8. Allowlist.
-	b.line("%s ip daddr @allow_%d accept", chain, k)
-	b.line("%s ip daddr @allow_cidr_%d accept", chain, k)
+	if cfg.Proxied {
+		// TCP goes on to the relay; an HTTP proxy cannot carry anything
+		// else, so reject it at once (QUIC clients fall back to TCP).
+		for _, set := range []string{"allow", "allow_cidr"} {
+			b.line("%s ip daddr @%s_%d meta l4proto tcp accept", chain, set, k)
+		}
+		for _, set := range []string{"allow", "allow_cidr"} {
+			b.line("%s ip daddr @%s_%d counter log group %d prefix %q jump conn_reject",
+				chain, set, k, LogGroup, LogPrefix(k, ReasonNoProxyRoute))
+		}
+	} else {
+		b.line("%s ip daddr @allow_%d accept", chain, k)
+		b.line("%s ip daddr @allow_cidr_%d accept", chain, k)
+	}
 	// 9. Default deny.
 	b.line("%s %s", chain, logDrop(k, ReasonNotAllowed))
 
 	in := fmt.Sprintf("add rule inet %s sbin_%d", t, k)
 	b.line("%s ct state established,related accept", in)
 	b.line("%s ip daddr %s meta l4proto { tcp, udp } th dport 53 accept", in, sb.HostAddr)
+	if cfg.Proxied {
+		// Only connections the proxy redirect sent here; a sandbox
+		// connecting to the relay port directly is host access.
+		b.line("%s ip daddr %s tcp dport %d ct status dnat accept", in, sb.HostAddr, addressing.RelayPort)
+	}
 	b.line("%s %s", in, logDrop(k, ReasonHostAccess))
 
-	b.line("add element inet %s fwd_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
+	b.line("add element inet %s pre_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
 	b.line("add element inet %s in_vmap { %q : jump sbin_%d }", t, sb.HostVeth, k)
 	return b.String(), nil
 }
@@ -267,9 +319,9 @@ func RenderRemoveSandbox(k int) (string, error) {
 	b.line("add chain inet %s sbin_%d", t, k)
 	b.line("add set inet %s allow_%d { type ipv4_addr; flags timeout; }", t, k)
 	b.line("add set inet %s allow_cidr_%d { type ipv4_addr; flags interval; auto-merge; }", t, k)
-	b.line("add element inet %s fwd_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
+	b.line("add element inet %s pre_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)
 	b.line("add element inet %s in_vmap { %q : jump sbin_%d }", t, sb.HostVeth, k)
-	b.line("delete element inet %s fwd_vmap { %q }", t, sb.HostVeth)
+	b.line("delete element inet %s pre_vmap { %q }", t, sb.HostVeth)
 	b.line("delete element inet %s in_vmap { %q }", t, sb.HostVeth)
 	for _, c := range []string{"sb", "sbin"} {
 		b.line("flush chain inet %s %s_%d", t, c, k)
