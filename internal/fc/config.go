@@ -16,7 +16,7 @@ import (
 	"github.com/anvanster/egressd/internal/addressing"
 )
 
-// Fixed guest network identity, identical in every sandbox (PRD §6).
+// Fixed guest network identity, identical in every sandbox.
 const (
 	GuestMAC   = "06:00:AC:10:00:02"
 	GuestIface = "eth0"

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const prdExample = `
+const fullExample = `
 egress:
   default: deny
   allow_domains:
@@ -23,8 +23,8 @@ limits:
 upstream_dns: 1.1.1.1
 `
 
-func TestParsePRDExample(t *testing.T) {
-	p, err := Parse([]byte(prdExample))
+func TestParseFullExample(t *testing.T) {
+	p, err := Parse([]byte(fullExample))
 	if err != nil {
 		t.Fatal(err)
 	}

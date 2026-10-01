@@ -23,7 +23,7 @@ import (
 	"github.com/anvanster/egressd/internal/nft"
 )
 
-// TTL handling (PRD §6): answers are clamped to MaxTTL; set entries live for
+// TTL handling: answers are clamped to MaxTTL; set entries live for
 // max(clamped TTL, MinSetTimeout) so they outlast the client's cache.
 const (
 	MaxTTL        = 300

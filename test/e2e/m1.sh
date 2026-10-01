@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M1 acceptance (PRD §10): exec-mode sandbox with egress policy.
+# M1 acceptance: exec-mode sandbox with egress policy.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 trap finish EXIT
 

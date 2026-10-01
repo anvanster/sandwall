@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M2 acceptance (PRD §10): limits and observability.
+# M2 acceptance: limits and observability.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 trap 'pkill -f "iperf3 -s -B $ATTACKER_IP" 2>/dev/null; finish' EXIT
 

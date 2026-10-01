@@ -17,7 +17,7 @@ vet:
 fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
-# Root-only scenario tests from PRD §10. Run inside a disposable Linux VM.
+# Root-only milestone acceptance tests. Run inside a disposable Linux VM.
 e2e: e2e-m1 e2e-m2 e2e-m3
 
 e2e-m1: build

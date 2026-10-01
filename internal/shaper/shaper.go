@@ -9,7 +9,7 @@
 //     ingress u32 match-all filter to eg-ifb<k>, whose tbf root qdisc
 //     shapes them. Caps max_egress_bw.
 //
-// PRD §6 suggests an ingress policer for sandbox -> world. A policer drops
+// The original design used an ingress policer for sandbox -> world. A policer drops
 // instead of queueing, and on a sub-millisecond veth path TCP collapses to a
 // fraction of the configured rate. Queueing on an IFB keeps TCP at the cap.
 // The u32 filter is used because cls_matchall is not available everywhere.

@@ -9,7 +9,7 @@
 //	  chain forward     (hook)  iifname vmap @fwd_vmap; unknown veth-h* drop
 //	  chain input       (hook)  iifname vmap @in_vmap;  unknown veth-h* drop
 //	  chain postrouting (hook)  masquerade sandbox traffic leaving the host
-//	  chain sb_<k>      per-sandbox egress policy (PRD §6 rules 1-9)
+//	  chain sb_<k>      per-sandbox egress policy
 //	  chain sbin_<k>    per-sandbox access to host-local addresses (DNS proxy only)
 //	  chain conn_reject shared reject for connection-limit overflows
 //	  set allow_<k>     DNS-learned IPs, per-element timeout
@@ -50,7 +50,7 @@ const (
 	ReasonUnknownIface = "unknown_iface"
 )
 
-// DefaultBlockedRanges are never reachable from a sandbox (PRD §6 rule 4),
+// DefaultBlockedRanges are never reachable from a sandbox,
 // plus reserved 240/4 which also covers the limited broadcast address.
 var DefaultBlockedRanges = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -221,7 +221,7 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	// 1. Return traffic for flows already admitted.
 	b.line("%s ct state established,related accept", chain)
 	// 2. DNS to the sandbox's own proxy. The proxy address is host-local, so
-	//    this traffic is actually admitted by sbin_<k>; kept for parity with PRD §6.
+	//    this traffic is actually admitted by sbin_<k>; kept so the chain reads as a complete policy.
 	b.line("%s ip daddr %s meta l4proto { tcp, udp } th dport 53 accept", chain, sb.HostAddr)
 	// 3. Any other DNS or DoT is a bypass attempt.
 	b.line("%s meta l4proto { tcp, udp } th dport { 53, 853 } %s", chain, logDrop(k, ReasonDNSBypass))

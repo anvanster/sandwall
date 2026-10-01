@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M3 acceptance (PRD §10): Firecracker VM mode and clone networking.
+# M3 acceptance: Firecracker VM mode and clone networking.
 # Needs /dev/kvm and the assets from fc-assets.sh.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 trap 'pkill -f "iperf3 -s -B $ATTACKER_IP" 2>/dev/null; finish' EXIT

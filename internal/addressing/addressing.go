@@ -1,5 +1,5 @@
 // Package addressing derives every per-sandbox name and address from the
-// sandbox index k, so all packages agree on the layout described in PRD §6.
+// sandbox index k, so all packages agree on one layout.
 package addressing
 
 import (

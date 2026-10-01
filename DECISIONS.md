@@ -1,6 +1,7 @@
 # Design decisions and deviations
 
-Deviations from, and clarifications of, the design in PRD §6.
+Deviations from, and clarifications of, the original design (an internal design document, not part of this repository).
+Each entry states what the original design said where that matters.
 Newest last.
 
 ## M1
@@ -8,27 +9,27 @@ Newest last.
 ### Host-local destinations need an INPUT chain (`sbin_<k>`)
 Traffic from a sandbox to an address owned by the host (the DNS proxy at `10.200.k.1`, the host's LAN IP, any other local address) never traverses the FORWARD hook, so the per-sandbox `sb_<k>` chain cannot see it.
 Each sandbox therefore also gets `sbin_<k>`, hooked from an `input` base chain, which accepts only established traffic and DNS to its own proxy and logs and drops everything else with reason `host_access`.
-PRD rule 2 is still rendered into `sb_<k>` for parity, but in practice it is `sbin_<k>` that admits proxy traffic.
+The original rule admitting DNS to the proxy is still rendered into `sb_<k>` for parity, but in practice it is `sbin_<k>` that admits proxy traffic.
 This is also what stops sandbox A from querying sandbox B's proxy, which would otherwise let A borrow B's allowlist.
 
 ### Dispatch via verdict maps, per-sandbox transactions
 The base chains dispatch with `iifname vmap @fwd_vmap` / `@in_vmap` instead of one `jump` rule per sandbox.
 Creating, reloading or removing a sandbox is one `nft -f` transaction touching only that sandbox's chains, sets and map entries.
 Re-rendering the whole table on every change would wipe the DNS-learned `allow_<k>` sets of every other sandbox.
-Rulesets are still generated as text and applied atomically, per PRD principle 5.
+Rulesets are still generated as text and applied atomically, as originally designed.
 Any `veth-h*` interface without a map entry is dropped (`unknown_iface`), so a sandbox is fail-closed while it is being created.
 
 ### Idempotent removal without `destroy`
-`nft destroy` needs kernel 6.3+, while the PRD floor is 5.10.
+`nft destroy` needs kernel 6.3+, while the supported floor is Linux 5.10.
 Removal scripts first `add` every object (a no-op if it exists) and then `delete` it, all in one transaction, so they succeed from any partial state on any supported kernel.
 Refreshing a DNS-learned set element uses the same add/delete/add pattern, because re-adding an existing element does not extend its timeout.
 
 ### Blocked ranges
-In addition to the PRD list, `240.0.0.0/4` (reserved, includes limited broadcast) is blocked.
+In addition to the originally specified list, `240.0.0.0/4` (reserved, includes limited broadcast) is blocked.
 The transfer supernet `10.200.0.0/16` is blocked by its own rule, ahead of the blocked-range set, so no exemption can open sandbox-to-sandbox traffic.
 
 ### Test endpoint: routed netns instead of a dummy link
-PRD §11 suggests an HTTP listener on a dummy interface `egtest0` with `10.99.0.1`.
+The original test plan suggested an HTTP listener on a dummy interface `egtest0` with `10.99.0.1`.
 An address on a host dummy link is host-local, so sandbox traffic to it would hit INPUT (`host_access`) rather than the FORWARD path that real internet destinations take.
 The e2e harness instead puts the listener in its own netns `egattacker`, reached through a veth `egtest0`, so the test exercises the same path as real egress.
 `10.99.0.0/24` falls in `10.0.0.0/8`, so the daemon has a `--blocked-exempt` flag (testing only; it logs a warning) to carve it out.
@@ -63,28 +64,28 @@ It also SIGKILLs any process still inside an `sb<k>` netns.
 Their original values are recorded once, never overwritten by a restart, and restored by `nuke`.
 
 ### Package layout
-`internal/daemon` is added to the PRD §9 layout.
+`internal/daemon` is added to the originally planned package layout.
 It owns sandbox lifecycle and is the only package that composes netns, nft, dnsproxy, flowlog and metrics; `internal/api` is only the HTTP transport in front of it.
 `internal/addressing` holds the index-to-names/addresses derivation that every package shares.
 
 ### Go version
 `go.mod` requires Go 1.26 rather than 1.22.
-The current `golang.org/x/{net,sys,sync,time}` releases require Go 1.25 to 1.26, and pinning older versions to meet the PRD floor would mean shipping stale security fixes.
+The current `golang.org/x/{net,sys,sync,time}` releases require Go 1.25 to 1.26, and pinning older versions to meet the originally planned Go 1.22 floor would mean shipping stale security fixes.
 
 ## M2
 
 ### Sandbox-to-world shaping uses IFB + tbf, not a policer
-PRD §6 suggests an ingress policer on `veth-h<k>` for `max_egress_bw`.
+The original design used an ingress policer on `veth-h<k>` for `max_egress_bw`.
 Measured on the e2e host, a policer with a 10 Mbit cap let TCP reach only 2 Mbit/s, and a 200 Mbit cap only 48 Mbit/s.
 A policer drops instead of queueing, and on a sub-millisecond veth path TCP keeps backing off.
 Instead, an ingress u32 match-all filter on `veth-h<k>` redirects packets to an IFB device `eg-ifb<k>`, whose `tbf` root qdisc queues and shapes them.
 With that, the same caps measure 9 and 191 Mbit/s.
-`max_ingress_bw` is the PRD's `tbf` on `veth-h<k>` egress.
+`max_ingress_bw` uses the originally designed `tbf` on `veth-h<k>` egress.
 A u32 filter is used because `cls_matchall` is not built into every kernel.
 `eg-ifb<k>` is created only while an egress cap is set, and `destroy`/`nuke` remove it.
 
 ### Connection-limit rejects use TCP reset
-The PRD's `ct count over N reject` sends ICMP port-unreachable.
+The originally designed `ct count over N reject` sends ICMP port-unreachable.
 The kernel rate-limits ICMP errors per destination (`net.ipv4.icmp_ratelimit`), so in a burst most rejects became silent drops and the client timed out (observed: 16 refused, 20 timed out of 36).
 Over-limit connections now jump to a shared `conn_reject` chain that answers TCP with a reset and everything else with `icmpx admin-prohibited`.
 The count stays one anonymous `ct count` per sandbox chain, so TCP and UDP share one budget.
@@ -122,8 +123,8 @@ This series counts logged deny events, which are de-duplicated per second, as an
 Inside a VM-mode netns, egressd owns `table ip egressd_vm`.
 Guest DNS to `172.16.0.1:53` is DNATed to `10.200.k.1:53`, and guest traffic leaving `veth-s<k>` is masqueraded to `10.200.k.2`.
 From then on the host enforces policy and attributes logs exactly as for exec mode.
-Two deviations from PRD §6:
-- **DNS DNAT is limited to destination `172.16.0.1`.** PRD §6 DNATs every port-53 packet. That would silently answer `dig @8.8.8.8` from the proxy, and the host would never see or log the bypass attempt. With the narrower DNAT, the M1 bypass check behaves the same from inside a guest.
+Two deviations from the original design:
+- **DNS DNAT is limited to destination `172.16.0.1`.** The original design DNATed every port-53 packet. That would silently answer `dig @8.8.8.8` from the proxy, and the host would never see or log the bypass attempt. With the narrower DNAT, the M1 bypass check behaves the same from inside a guest.
 - **The forward policy is `drop`.** Only `172.16.0.2` may be forwarded out (no spoofing), and the guest cannot open connections to the netns itself.
 
 The host reaches a guest over SSH from inside its netns (the e2e harness's control channel).
