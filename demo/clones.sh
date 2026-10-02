@@ -5,12 +5,15 @@
 # lives in its own netns with its own policy and log. Each guest runs a small
 # workload: an allowed fetch through its own name (c<N>.attacker.test) plus
 # a few things the policy blocks. `sandwall logs -f` for every clone is merged
-# into one live stream, and a per-clone summary follows.
+# into one live stream. Halfway through, clone c-3 is quarantined: its lines
+# turn into drops while the other clones carry on. A per-clone summary
+# follows.
 #
 # Needs /dev/kvm. Usage (root, Linux):
 #   sudo SANDWALL=$PWD/bin/sandwall demo/clones.sh
 # Environment: CLONES (default 20), DURATION seconds (default 30),
-#   CLONE_STAGGER (default 1s, needed on nested-virtualization hosts).
+#   CLONE_STAGGER (default 1s, needed on nested-virtualization hosts; 0 works
+#   on bare metal), FC_ASSETS, CHROOT_BASE.
 set -uo pipefail
 
 DEMO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,10 +62,14 @@ for i in $(seq "$CLONES"); do
 	"$SANDWALL" "${G[@]}" logs "c-$i" -f > >(
 		jq --unbuffered -r --arg red "$RED" --arg green "$GREEN" --arg reset "$RESET" '
 			(if .verdict == "allow" then $green else $red end) as $c |
+			if .type == "quarantine" then
+				"    \(.sandbox_id | (. + "     ")[:5]) \($c)\(.verdict | ascii_upcase)\($reset) \(.reason // "")"
+			else
 			"    \(.sandbox_id | (. + "     ")[:5]) \($c)\(.type | (. + "    ")[:4]) \(.verdict | (. + "       ")[:7])\($reset) " +
 			(if .type == "dns" then "\(.qtype) \(.qname)"
 			 elif .type == "flow" then "\(.dst_domain // .dst_ip):\(.dst_port) in=\(.bytes_in)B"
-			 else "\(.reason) \(.proto) \(.dst_ip):\(.dst_port)" end)') &
+			 elif .type == "relay" then "\(.reason // "ok") sni=\(.sni // "-") \(.dst_ip):\(.dst_port)"
+			 else "\(.reason) \(.proto) \(.dst_ip):\(.dst_port)" end) end') &
 	TAILS+=($!)
 done
 # Each guest: an allowed fetch through its own name, then things the policy blocks.
@@ -74,13 +81,19 @@ for i in $(seq "$CLONES"); do
 		sleep 10
 	done' >/dev/null 2>&1 &"
 done
-sleep "$DURATION"
+sleep $((DURATION / 2))
+if ((CLONES >= 3)); then
+	printf '    %s-- sandwall sandbox quarantine c-3%s\n' "$BOLD" "$RESET"
+	"$SANDWALL" "${G[@]}" sandbox quarantine c-3 --reason "demo: c-3 misbehaves" >/dev/null
+fi
+sleep $((DURATION - DURATION / 2))
 kill "${TAILS[@]}" 2>/dev/null
 TAILS=()
 
 step "per-clone summary (from each clone's own log)"
-printf '    %-6s %6s %10s %10s %7s\n' clone flows bytes-in dns-denied denied
+printf '    %-6s %6s %10s %10s %7s  %s\n' clone flows bytes-in dns-denied denied state
 for i in $(seq "$CLONES"); do
+	state=$("$SANDWALL" "${G[@]}" sandbox list --json | jq -r --arg id "c-$i" '.[] | select(.id == $id) | if .quarantine then "quarantined" else "ok" end')
 	read -r flows bytes refused denied foreign < <(jq -s -r --arg id "c-$i" '[
 		(map(select(.type == "flow")) | length),
 		(map(select(.type == "flow") | .bytes_in) | add // 0),
@@ -88,7 +101,7 @@ for i in $(seq "$CLONES"); do
 		(map(select(.type == "deny")) | length),
 		(map(select(.sandbox_id != $id)) | length)
 	] | @tsv' "$LOGS/c-$i.jsonl")
-	printf '    %-6s %6d %10d %10d %7d' "c-$i" "$flows" "$bytes" "$refused" "$denied"
+	printf '    %-6s %6d %10d %10d %7d  %s' "c-$i" "$flows" "$bytes" "$refused" "$denied" "$state"
 	((foreign > 0)) && printf '  %sMISATTRIBUTED: %d%s' "$RED" "$foreign" "$RESET"
 	printf '\n'
 done

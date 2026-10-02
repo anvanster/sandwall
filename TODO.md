@@ -15,7 +15,8 @@ Run these on a host with direct egress, without `REAL_PROXY`.
   - `curl --http3` to an allowlisted name falls back to TCP after `quic_blocked`;
   - `pip install` (many connections to pypi.org and files.pythonhosted.org) succeeds.
 - [ ] **Relay cost:** throughput and latency of a large HTTPS download through the relay compared with `--sni-check=false`, with and without a `max_ingress_bw` cap (the M2 bandwidth checks use port 5201, which the relay does not see).
-- [ ] **Demos:** re-run `demo/exfil.sh` and `demo/clones.sh` and refresh the README output; they predate the SNI check and the `relay` event.
+- [x] **Demos:** `demo/exfil.sh` gained act (c), escalation caught by the SNI check and a DNS-bypass drop, auto-quarantine and a signed webhook; `demo/clones.sh` quarantines one clone mid-run. README output refreshed (run behind an HTTP proxy, 2026-10-02).
+- [ ] **Demos in direct mode:** run `demo/exfil.sh` and `demo/clones.sh` once without `REAL_PROXY`; act (c)'s fronting attempt then goes through the direct-mode relay.
 
 ## Incident response (ahead of S2/S3)
 

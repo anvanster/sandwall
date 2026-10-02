@@ -16,3 +16,10 @@ limits:
   max_conns: 64
   new_conns_per_sec: 20
   dns_qps: 50
+# Tricks no well-behaved tool uses: two of them within a minute quarantine
+# the sandbox (cut off, kept for forensics; `sandwall sandbox release`).
+quarantine:
+  triggers:
+    - reasons: [dns_bypass, sni_mismatch, host_mismatch]
+      count: 2
+      window: 60s

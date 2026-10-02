@@ -4,13 +4,20 @@
 #   (a) an "open" sandbox: its own netns with plain NAT, like most sandboxes.
 #       The agent reads a planted .env and exfiltrates it by HTTP POST and
 #       through DNS query names. Both succeed.
-#   (b) an sandwall sandbox with an allowlist for pypi/GitHub. The same agent
+#   (b) a sandwall sandbox with an allowlist for pypi/GitHub. The same agent
 #       gets nothing out; the deny log and metrics show what it tried.
+#   (c) the agent escalates: DNS straight to a public resolver, and domain
+#       fronting through an allowlisted CDN address. Two such tricks trip the
+#       policy's quarantine trigger: the sandbox is cut off, a signed webhook
+#       reports it, and even the allowlisted sites are unreachable until
+#       `sandwall sandbox release`.
 #
 # The "attacker" is a local listener in its own netns at 10.99.0.1, so the
-# demo needs no internet access for the exfiltration itself.
+# demo needs no internet access for the exfiltration itself; (b)'s final
+# check and (c)'s fronting attempt use pypi.org.
 #
 # Usage (root, Linux): sudo SANDWALL=$PWD/bin/sandwall demo/exfil.sh
+#   (behind an HTTP proxy, add REAL_PROXY=http://host:port)
 set -uo pipefail
 
 DEMO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,7 +31,9 @@ if [[ -t 1 ]]; then BOLD=$'\e[1m' RED=$'\e[31m' GREEN=$'\e[32m' DIM=$'\e[2m' RES
 step() { printf '\n%s== %s%s\n' "$BOLD" "$*" "$RESET"; }
 note() { printf '%s%s%s\n' "$DIM" "$*" "$RESET"; }
 
+HOOK_PID=""
 cleanup() {
+	[[ -n "$HOOK_PID" ]] && kill "$HOOK_PID" 2>/dev/null
 	stop_daemon
 	"$SANDWALL" "${G[@]}" nuke >/dev/null 2>&1
 	ip netns pids "$OPEN_NS" 2>/dev/null | xargs -r kill 2>/dev/null
@@ -85,9 +94,27 @@ if [[ -s "$ATTACKER_LOOT" ]]; then
 	printf '%s=> secrets exfiltrated%s\n' "$RED$BOLD" "$RESET"
 fi
 
-step "(b) sandwall sandbox: default deny, allowlist $(grep -c '^    - ' "$DEMO_DIR/policy.yaml") domains"
-start_daemon || exit 1
-"$SANDWALL" "${G[@]}" sandbox create agent --policy "$DEMO_DIR/policy.yaml"
+# A signed webhook receiver on loopback, standing in for a SOC endpoint, and
+# the demo policy with alerts to it.
+HOOKS="$T/hooks.jsonl"
+HOOK_SECRET="demo-$(head -c16 /dev/urandom | xxd -p)"
+printf '%s\n' "$HOOK_SECRET" >"$T/hook.key"
+python3 "$DEMO_DIR/../test/e2e/webhook.py" --port 18081 --out "$HOOKS" --secret "$HOOK_SECRET" >/dev/null 2>&1 &
+HOOK_PID=$!
+{ cat "$DEMO_DIR/policy.yaml"; printf 'alerts:\n  webhooks: [soc]\n'; } >"$T/policy.yaml"
+domains=$(awk '/^  allow_domains:/ {f = 1; next} /^  [a-z_]+:/ {f = 0} f && /^    - /' "$DEMO_DIR/policy.yaml" | wc -l)
+deny_log() {
+	"$SANDWALL" "${G[@]}" logs agent --deny-only |
+		jq -r '"    \(.ts[11:23])  \(.type)  \(.verdict)/\(.reason // "-")" + (
+			if .qname then "  \(.qtype) \(.qname)"
+			elif .type == "quarantine" then ""
+			elif .type == "relay" then "  \(.proto) \(.dst_ip):\(.dst_port) sni=\(.sni // "-")"
+			else "  \(.proto) \(.dst_ip):\(.dst_port)" end)'
+}
+
+step "(b) sandwall sandbox: default deny, allowlist $domains domains"
+start_daemon --webhook "soc=http://127.0.0.1:18081/hook" --webhook-secret "soc=$T/hook.key" || exit 1
+"$SANDWALL" "${G[@]}" sandbox create agent --policy "$T/policy.yaml"
 : >"$ATTACKER_LOOT"
 "$SANDWALL" "${G[@]}" sandbox exec agent -- "${AGENT[@]}"
 sleep 1
@@ -100,11 +127,30 @@ fi
 printf '    (nothing)\n%s=> nothing left the sandbox%s\n' "$GREEN$BOLD" "$RESET"
 
 note "sandwall logs agent --deny-only:"
-"$SANDWALL" "${G[@]}" logs agent --deny-only |
-	jq -r '"    \(.ts[11:23])  \(.type)  \(.verdict)/\(.reason // "-")  \(if .qname then "\(.qtype) \(.qname)" else "\(.proto) \(.dst_ip):\(.dst_port)" end)"'
+deny_log
+seen=$(deny_log | wc -l)
 note "metrics (curl :9464/metrics):"
 curl -s http://127.0.0.1:19464/metrics | grep -E '^sandwall_(denied_total|dns_queries_total)\{.*sandbox="agent"' | sed 's/^/    /'
 
 step "the agent can still do its job"
 code=$("$SANDWALL" "${G[@]}" sandbox exec agent -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/simple/requests/ 2>&1)
 printf '    curl https://pypi.org/simple/requests/ -> %s\n' "$code"
+
+step "(c) the agent escalates"
+"$SANDWALL" "${G[@]}" sandbox exec agent -- "${AGENT[@]}" --escalate
+sleep 1
+note "sandwall logs agent --deny-only (new lines):"
+deny_log | tail -n +$((seen + 1))
+note "sandwall sandbox list:"
+"$SANDWALL" "${G[@]}" sandbox list | awk 'NR == 1 || $1 == "agent" {print "    " $1, $4}' | column -t | sed 's/^/    /'
+note "webhook soc received (signature checked):"
+jq -r '"    \(if .ok then "signature ok " else "BAD SIGNATURE" end)  " +
+	([.body.events[] | "\(.type)/\(if .type == "quarantine" then .verdict else .reason // .verdict end)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", "))' "$HOOKS"
+code=$("$SANDWALL" "${G[@]}" sandbox exec agent -- curl -sS -m 5 -o /dev/null -w '%{http_code}' https://pypi.org/simple/requests/ 2>/dev/null)
+printf '    curl https://pypi.org/simple/requests/ -> %s\n' "$code"
+if [[ "$code" == 200 ]]; then
+	printf '%s=> the sandbox was not cut off%s\n' "$RED$BOLD" "$RESET"
+	exit 1
+fi
+printf '%s=> quarantined: cut off, kept for forensics (sandwall sandbox release agent)%s\n' "$GREEN$BOLD" "$RESET"
+

