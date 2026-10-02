@@ -5,7 +5,10 @@ egress:
     - pypi.org
     - files.pythonhosted.org
     - github.com
-    - "*.githubusercontent.com"
+    # Exact names: githubusercontent.com is a public suffix, so a wildcard
+    # over it fails `sandwall policy lint`.
+    - raw.githubusercontent.com
+    - objects.githubusercontent.com
   allow_cidrs: []
 limits:
   max_egress_bw: 50mbit

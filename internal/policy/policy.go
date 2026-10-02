@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/anvanster/sandwall/internal/policy/psl"
 )
 
 // Defaults applied when a limit is omitted from the policy file.
@@ -80,6 +82,9 @@ type Egress struct {
 	Default      string   `yaml:"default" json:"default"`
 	AllowDomains []string `yaml:"allow_domains" json:"allow_domains"`
 	AllowCIDRs   []string `yaml:"allow_cidrs" json:"allow_cidrs"`
+	// AllowMultitenant acknowledges allow_domains wildcards over shared
+	// hosting platforms (see Lint). It allows nothing by itself.
+	AllowMultitenant []string `yaml:"allow_multitenant,omitempty" json:"allow_multitenant,omitempty"`
 }
 
 // Limits holds rate and connection limits. Bandwidths are kept as the
@@ -139,6 +144,20 @@ func (p *Policy) normalize() error {
 		domains = append(domains, n)
 	}
 	p.Egress.AllowDomains = domains
+
+	acks := make([]string, 0, len(p.Egress.AllowMultitenant))
+	for _, d := range p.Egress.AllowMultitenant {
+		n, err := NormalizePattern(d)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("egress.allow_multitenant: %w", err))
+		case !slices.Contains(domains, n):
+			errs = append(errs, fmt.Errorf("egress.allow_multitenant: %q is not in egress.allow_domains", d))
+		default:
+			acks = append(acks, n)
+		}
+	}
+	p.Egress.AllowMultitenant = acks
 
 	cidrs := make([]string, 0, len(p.Egress.AllowCIDRs))
 	for _, c := range p.Egress.AllowCIDRs {
@@ -224,6 +243,62 @@ func (p *Policy) normalize() error {
 		}
 	}
 
+	return errors.Join(errs...)
+}
+
+// MultitenantWildcard is an allow_domains wildcard over a public suffix:
+// it matches names that unrelated parties control.
+type MultitenantWildcard struct {
+	Pattern string // "*.vercel.app"
+	// Suffix is the public suffix the pattern covers ("vercel.app"), or
+	// one below it ("s3.amazonaws.com" for "*.amazonaws.com").
+	Suffix       string
+	Acknowledged bool // listed in egress.allow_multitenant
+}
+
+func (m MultitenantWildcard) String() string {
+	if strings.TrimPrefix(m.Pattern, "*.") == m.Suffix {
+		return fmt.Sprintf("%q matches every site hosted under the public suffix %q", m.Pattern, m.Suffix)
+	}
+	return fmt.Sprintf("%q covers the public suffix %q, so it matches sites hosted under it", m.Pattern, m.Suffix)
+}
+
+// MultitenantWildcards lists the allow_domains wildcards that cover a public
+// suffix (Public Suffix List, ICANN or private section). Anyone can host a
+// site under such a suffix, e.g. "*.vercel.app" or "*.github.io", so a
+// sandbox allowed one can reach an endpoint whoever attacks it controls,
+// and the SNI/Host check cannot tell the difference.
+func (p *Policy) MultitenantWildcards() []MultitenantWildcard {
+	var out []MultitenantWildcard
+	for _, d := range p.Egress.AllowDomains {
+		base, ok := strings.CutPrefix(d, "*.")
+		if !ok {
+			continue
+		}
+		suffix := ""
+		if psl.IsSuffix(base) {
+			suffix = base
+		} else if under := psl.SuffixesUnder(base); len(under) > 0 {
+			suffix = strings.TrimPrefix(under[0], "*.")
+		}
+		if suffix != "" {
+			out = append(out, MultitenantWildcard{Pattern: d, Suffix: suffix, Acknowledged: slices.Contains(p.Egress.AllowMultitenant, d)})
+		}
+	}
+	return out
+}
+
+// Lint rejects multi-tenant wildcards that egress.allow_multitenant does
+// not acknowledge. It is separate from Parse so that policies stored
+// before a Public Suffix List update keep loading.
+func (p *Policy) Lint() error {
+	var errs []error
+	for _, m := range p.MultitenantWildcards() {
+		if !m.Acknowledged {
+			errs = append(errs, fmt.Errorf("egress.allow_domains: %s; a sandbox could reach an endpoint anyone can set up there. "+
+				"Allow exact names instead, or acknowledge it in egress.allow_multitenant", m))
+		}
+	}
 	return errors.Join(errs...)
 }
 

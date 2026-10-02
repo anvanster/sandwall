@@ -1,0 +1,3 @@
+egress:
+  default: deny
+  allow_domains: [pypi.org, "*.vercel.app"]

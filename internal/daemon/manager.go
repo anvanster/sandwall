@@ -319,6 +319,11 @@ func (mgr *Manager) restore(ctx context.Context) error {
 			mgr.log.Error("skipping sandbox with invalid stored policy", "id", rec.ID, "err", err)
 			continue
 		}
+		// Lint only warns here: a policy accepted before a Public Suffix
+		// List update must not orphan a running sandbox.
+		if err := pol.Lint(); err != nil {
+			mgr.log.Warn("stored policy fails the allowlist lint; fix it with policy apply", "id", rec.ID, "err", err)
+		}
 		if err := mgr.setup(ctx, rec, pol, true); err != nil {
 			mgr.log.Error("failed to restore sandbox", "id", rec.ID, "err", err)
 			continue
@@ -353,6 +358,19 @@ func (mgr *Manager) Create(ctx context.Context, id, mode, policyYAML, vmConfig s
 	mgr.opMu.Lock()
 	defer mgr.opMu.Unlock()
 	return mgr.create(ctx, Record{ID: id, Mode: mode, Policy: policyYAML, VMConfig: vmConfig})
+}
+
+// parseNew parses a policy submitted for a new sandbox or a policy apply,
+// which must also pass the allowlist lint.
+func parseNew(yaml string) (*policy.Policy, error) {
+	pol, err := policy.Parse([]byte(yaml))
+	if err != nil {
+		return nil, err
+	}
+	if err := pol.Lint(); err != nil {
+		return nil, err
+	}
+	return pol, nil
 }
 
 // MaxStagger bounds the pause between clone starts.
@@ -409,7 +427,7 @@ func (mgr *Manager) create(ctx context.Context, rec Record) (Info, error) {
 	if !idPattern.MatchString(rec.ID) {
 		return Info{}, fmt.Errorf("invalid sandbox id %q: use 1-63 of [a-zA-Z0-9_.-], starting alphanumeric", rec.ID)
 	}
-	pol, err := policy.Parse([]byte(rec.Policy))
+	pol, err := parseNew(rec.Policy)
 	if err != nil {
 		return Info{}, err
 	}
@@ -643,7 +661,7 @@ func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry, direct 
 // the allow sets flushed and repopulated in one transaction, so established
 // flows survive. tc and Firecracker limits follow.
 func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Info, error) {
-	pol, err := policy.Parse([]byte(policyYAML))
+	pol, err := parseNew(policyYAML)
 	if err != nil {
 		return Info{}, err
 	}

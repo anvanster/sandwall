@@ -17,6 +17,15 @@ expect_ok "create sandbox t2" sandwall sandbox create t2 --policy "$P/m1.yaml"
 expect_fail "duplicate id rejected" sandwall sandbox create t1 --policy "$P/m1.yaml"
 expect_fail "invalid policy rejected" sandwall sandbox create bad --policy "$P/invalid.yaml"
 expect_eq "invalid create left nothing behind" "$(ip netns list | grep -cE '^sb[0-9]+')" 2
+out=$(sandwall sandbox create mt --policy "$P/multitenant.yaml" 2>&1)
+expect_ok "multi-tenant wildcard rejected at create" grep -q '"\*.vercel.app" matches every site hosted under the public suffix "vercel.app"' <<<"$out"
+expect_eq "rejected create left nothing behind" "$(ip netns list | grep -cE '^sb[0-9]+')" 2
+expect_fail "multi-tenant wildcard rejected at policy apply" sandwall policy apply t1 "$P/multitenant.yaml"
+expect_eq "t1 keeps its policy" "$(sb_field t1 '.policy.egress.allow_domains | index("*.vercel.app")')" null
+expect_ok "acknowledged multi-tenant wildcard accepted" sandwall sandbox create mt --policy "$P/multitenant-ack.yaml"
+expect_ok "destroy mt" sandwall sandbox destroy mt
+expect_fail "policy lint flags it offline" "$SANDWALL" policy lint "$P/multitenant.yaml"
+expect_ok "policy lint accepts the acknowledged one" "$SANDWALL" policy lint "$P/multitenant-ack.yaml"
 
 log "sandbox isolation"
 expect_eq "exec runs as nobody" "$(sbx t1 id -u)" 65534

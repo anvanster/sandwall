@@ -23,7 +23,7 @@ Detection without a working kill switch is half a control: today nothing acts on
 
 - [x] **`sandbox quarantine <id>` / `sandbox release <id>`:** cut all network access at once, including established flows and relayed connections, refuse all DNS, keep the netns, VM and logs for forensics; optionally freeze the sandbox's processes or pause its VM. Survives a daemon restart.
 - [x] **Automatic quarantine:** per-policy trigger rules, e.g. N `dns_bypass` / `sni_mismatch` / `not_allowed` denies within T seconds, that quarantine the sandbox themselves (not only notify).
-- [ ] **Allowlist linting:** warn about, or require an explicit opt-in for, wildcards over multi-tenant platforms (`*.vercel.app`, `*.herokuapp.com`, `*.cloudfront.net`, ...), where anyone can host an endpoint that passes the SNI check. The private section of the Public Suffix List covers most of them.
+- [x] **Allowlist linting:** warn about, or require an explicit opt-in for, wildcards over multi-tenant platforms (`*.vercel.app`, `*.herokuapp.com`, `*.cloudfront.net`, ...), where anyone can host an endpoint that passes the SNI check. The private section of the Public Suffix List covers most of them.
 
 ## Features
 

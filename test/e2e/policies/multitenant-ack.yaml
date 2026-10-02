@@ -1,0 +1,4 @@
+egress:
+  default: deny
+  allow_domains: [pypi.org, "*.vercel.app"]
+  allow_multitenant: ["*.vercel.app"]

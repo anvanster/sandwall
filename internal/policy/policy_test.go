@@ -134,3 +134,47 @@ quarantine:
 		}
 	}
 }
+
+func TestMultitenantWildcards(t *testing.T) {
+	p, err := Parse([]byte(`
+egress:
+  allow_domains: ["*.vercel.app", "*.amazonaws.com", "*.co.uk", "*.github.io", "*.foo.vercel.app", "vercel.app", pypi.org, "*.files.pythonhosted.org"]
+  allow_multitenant: ["*.GitHub.io"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]MultitenantWildcard{}
+	for _, m := range p.MultitenantWildcards() {
+		got[m.Pattern] = m
+	}
+	if len(got) != 4 {
+		t.Fatalf("findings %v", got)
+	}
+	if m := got["*.amazonaws.com"]; !strings.HasSuffix(m.Suffix, ".amazonaws.com") || m.Acknowledged {
+		t.Errorf("*.amazonaws.com: %+v", m)
+	}
+	if m := got["*.github.io"]; !m.Acknowledged {
+		t.Errorf("acknowledgement not applied: %+v", m)
+	}
+	err = p.Lint()
+	if err == nil {
+		t.Fatal("unacknowledged wildcards passed Lint")
+	}
+	for _, want := range []string{`"*.vercel.app" matches every site hosted under the public suffix "vercel.app"`, `"*.co.uk"`, "allow_multitenant"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Lint error lacks %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "github.io") || strings.Contains(err.Error(), "foo.vercel.app") {
+		t.Errorf("Lint reported an acknowledged or single-tenant pattern:\n%v", err)
+	}
+
+	if _, err := Parse([]byte("egress:\n  allow_domains: [pypi.org]\n  allow_multitenant: [\"*.vercel.app\"]\n")); err == nil {
+		t.Error("acknowledgement of a pattern missing from allow_domains accepted")
+	}
+	clean, err := Parse([]byte("egress:\n  allow_domains: [pypi.org, \"*.files.pythonhosted.org\"]\n"))
+	if err != nil || clean.Lint() != nil {
+		t.Errorf("clean policy: %v %v", err, clean.Lint())
+	}
+}

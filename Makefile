@@ -9,7 +9,7 @@ E2E_ENV = SANDWALL=$(CURDIR)/$(BIN) $(if $(FC_ASSETS),FC_ASSETS=$(FC_ASSETS)) \
 	$(if $(CHROOT_BASE),CHROOT_BASE=$(CHROOT_BASE)) $(if $(E2E_TMP),E2E_TMP=$(E2E_TMP)) \
 	$(foreach v,CLONES CLONE_STAGGER FETCH_CONCURRENCY REAL_PROXY,$(if $($(v)),$(v)=$($(v))))
 
-.PHONY: build test vet fmt-check e2e e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-quarantine fc-assets clean
+.PHONY: psl-update build test vet fmt-check e2e e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-quarantine fc-assets clean
 
 build:
 	CGO_ENABLED=0 GOOS=linux $(GO) build $(GOFLAGS) -o $(BIN) ./cmd/sandwall
@@ -52,6 +52,11 @@ fc-assets:
 
 e2e-m3: build fc-assets
 	sudo $(E2E_ENV) bash test/e2e/m3.sh
+
+# Refresh the embedded Public Suffix List used by the allowlist lint.
+psl-update:
+	curl -fsSL https://publicsuffix.org/list/public_suffix_list.dat -o internal/policy/psl/public_suffix_list.dat
+	$(GO) test ./internal/policy/...
 
 clean:
 	rm -rf bin

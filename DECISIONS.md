@@ -383,6 +383,31 @@ The deny log already collapses identical drops to one per second, so a single bl
 The policy accepts only reasons something produces; a unit test keeps that list in step with the firewall, relay and DNS constants.
 A daemon restart resets the counts, which only delays a trigger.
 
+## Allowlist lint: wildcards over shared hosting
+
+### What counts as multi-tenant
+A wildcard `*.X` is multi-tenant when `X` is a public suffix, or when a public suffix lies below `X` (`*.amazonaws.com` covers `s3.amazonaws.com`), according to the Public Suffix List, ICANN and private sections.
+The private section is maintained by the platforms themselves to say exactly this: names below the suffix belong to different, unrelated parties.
+A wildcard below a tenant (`*.my-app.vercel.app`) and exact names are not flagged.
+The policy's existing rule that a wildcard must cover at least a second-level domain already stops `*.com`; the list also stops `*.co.uk`.
+
+### Reject with acknowledgement, not warn
+A warning in a daemon log is easy to miss, and the cost of the mistake is an exfiltration path, so `sandbox create`, `vm clone` and `policy apply` reject an unacknowledged multi-tenant wildcard.
+The acknowledgement lives in the policy (`egress.allow_multitenant`, which must repeat an `allow_domains` entry and allows nothing by itself), not in a CLI flag, so it is reviewed and stored with the policy and survives restarts.
+
+### Lint is separate from parsing
+`policy.Parse` stays structural; `Lint` is applied only to newly submitted policies.
+A daemon restoring a sandbox whose stored policy fails the lint, for instance after a list update adds a suffix, logs a warning and restores it, rather than leaving a running sandbox unmanaged.
+
+### The list is embedded
+`golang.org/x/net/publicsuffix` can tell whether a name is a suffix but cannot list the suffixes below a name, which `*.amazonaws.com` needs, so the list file is embedded (`internal/policy/psl`, about 330 KB) and parsed once on first use.
+It is MPL-2.0, kept unmodified with its license header; `make psl-update` refreshes it.
+Lint errors name the list version.
+
+### Not covered
+Exact names that serve many users' content (`raw.githubusercontent.com`, `gist.github.com`) are single names to the lint; the README lists them as a known gap.
+The project's own demo policy used `*.githubusercontent.com` and failed the lint; it now lists exact names.
+
 ## Name
 
 The project was developed as `egressd` and renamed to `sandwall` before its first release.

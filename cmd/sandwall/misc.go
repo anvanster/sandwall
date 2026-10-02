@@ -13,6 +13,8 @@ import (
 	"github.com/anvanster/sandwall/internal/api"
 	"github.com/anvanster/sandwall/internal/daemon"
 	"github.com/anvanster/sandwall/internal/flowlog"
+	"github.com/anvanster/sandwall/internal/policy"
+	"github.com/anvanster/sandwall/internal/policy/psl"
 )
 
 func newPolicyCmd(g *globalFlags) *cobra.Command {
@@ -32,6 +34,27 @@ func newPolicyCmd(g *globalFlags) *cobra.Command {
 				return err
 			}
 			fmt.Printf("applied %s to %s\n", args[1], args[0])
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "lint <policy.yaml>",
+		Short: "Validate a policy offline, including wildcards over shared hosting platforms",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pol, err := policy.Load(args[0])
+			if err != nil {
+				return err
+			}
+			for _, m := range pol.MultitenantWildcards() {
+				if m.Acknowledged {
+					fmt.Printf("acknowledged: %s\n", m)
+				}
+			}
+			if err := pol.Lint(); err != nil {
+				return fmt.Errorf("%w\n(Public Suffix List %s)", err, psl.Version())
+			}
+			fmt.Printf("%s: ok\n", args[0])
 			return nil
 		},
 	})
