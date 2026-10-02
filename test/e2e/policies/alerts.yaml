@@ -1,0 +1,12 @@
+egress:
+  default: deny
+  allow_domains: ["*.attacker.test"]
+upstream_dns: 10.99.0.1:5353
+alerts:
+  webhooks: [ops]
+  reasons: [dns_bypass, quarantine]
+quarantine:
+  triggers:
+    - reasons: [dns_bypass]
+      count: 2
+      window: 30s

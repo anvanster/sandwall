@@ -178,3 +178,29 @@ egress:
 		t.Errorf("clean policy: %v %v", err, clean.Lint())
 	}
 }
+
+func TestAlerts(t *testing.T) {
+	p, err := Parse([]byte(`
+alerts:
+  webhooks: [Ops, ops, security]
+  reasons: [DNS_Bypass, quarantine, quarantine]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(p.Alerts.Webhooks, ","); got != "ops,security" {
+		t.Errorf("webhooks %s", got)
+	}
+	if got := strings.Join(p.Alerts.Reasons, ","); got != "dns_bypass,quarantine" {
+		t.Errorf("reasons %s", got)
+	}
+	for name, bad := range map[string]string{
+		"no webhooks":    `alerts: {reasons: [dns_bypass]}`,
+		"bad name":       `alerts: {webhooks: ["https://x"]}`,
+		"unknown reason": `alerts: {webhooks: [ops], reasons: [flow]}`,
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

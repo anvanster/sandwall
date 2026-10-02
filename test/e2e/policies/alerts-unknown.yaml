@@ -1,0 +1,5 @@
+egress:
+  default: deny
+  allow_domains: [pypi.org]
+alerts:
+  webhooks: [nosuch]

@@ -24,6 +24,9 @@ type Metrics struct {
 	Quarantined *prometheus.GaugeVec
 	// AutoQuarantines counts quarantines started by a policy trigger.
 	AutoQuarantines *prometheus.CounterVec
+	// WebhookDeliveries counts webhook deliveries (ok, error) and events
+	// dropped from a full queue, per webhook. It has no sandbox label.
+	WebhookDeliveries *prometheus.CounterVec
 }
 
 // New registers all collectors.
@@ -51,8 +54,11 @@ func New() *Metrics {
 		AutoQuarantines: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sandwall_auto_quarantines_total", Help: "Quarantines started by a policy trigger.",
 		}, []string{"sandbox"}),
+		WebhookDeliveries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandwall_webhook_deliveries_total", Help: "Webhook deliveries by result (ok, error), and events dropped from a full queue (dropped).",
+		}, []string{"webhook", "result"}),
 	}
-	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections, m.Quarantined, m.AutoQuarantines,
+	m.reg.MustRegister(m.Flows, m.Bytes, m.DNSQueries, m.Denied, m.RelayConnections, m.Quarantined, m.AutoQuarantines, m.WebhookDeliveries,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }

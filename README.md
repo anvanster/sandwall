@@ -226,6 +226,46 @@ A trigger fires once; a release re-arms the triggers with counts from zero, and 
 Triggers are off unless the policy has a `quarantine` block.
 `dns_bypass`, `sni_mismatch` and `host_mismatch` rarely come from well-behaved software, so low counts suit them; `not_allowed` and `dns_refused` also come from ordinary misconfiguration, such as a missing allowlist entry, and want higher counts.
 
+## Alerts (webhooks)
+
+Webhook endpoints are configured on the daemon, so their URLs and signing keys never appear in policies:
+
+```sh
+sudo bin/sandwall daemon --webhook ops=https://hooks.example.com/sandwall --webhook-secret ops=/etc/sandwall/ops.key
+```
+
+A sandbox's policy then chooses which endpoints receive its violations, and which violations:
+
+```yaml
+alerts:
+  webhooks: [ops]
+  reasons: [dns_bypass, sni_mismatch, quarantine]   # optional; default: every violation and quarantine
+```
+
+`reasons` takes the same names as quarantine triggers, plus `quarantine` for quarantine and release events.
+A policy that names a webhook the daemon does not have is rejected.
+
+Each delivery is a JSON `POST` of up to 100 events, sent at most every 2 seconds; a quarantine event is sent at once:
+
+```json
+{"source": "sandwall", "sent_at": "2026-10-02T09:15:02Z", "dropped": 0,
+ "events": [{"ts": "...", "type": "deny", "sandbox_id": "agent", "verdict": "deny",
+             "reason": "dns_bypass", "proto": "udp", "dst_ip": "8.8.8.8", "dst_port": 53}]}
+```
+
+The events are the same objects as in the sandbox's log.
+With `--webhook-secret`, requests carry `X-Sandwall-Timestamp` and `X-Sandwall-Signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<body>` keyed with the file's contents (at least 16 bytes). Receivers should check it, and reject old timestamps:
+
+```python
+want = "sha256=" + hmac.new(key, ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(want, request.headers["X-Sandwall-Signature"])
+```
+
+Delivery never slows the sandbox down: each endpoint has a bounded queue of 1000 events, and events that do not fit are counted and reported as `dropped` in the next payload.
+A failed delivery is retried twice, 1 and 2 seconds apart, then counted as an error; the events stay in the sandbox's log either way.
+With an upstream proxy, webhooks go through it, except to loopback and `no_proxy` destinations.
+Queued events are delivered when the daemon stops, for up to 10 seconds.
+
 ## Observability
 
 Each sandbox has a JSONL log at `/var/log/sandwall/<id>.jsonl`; `sandwall logs <id> [-f] [--deny-only]` prints it.
@@ -254,6 +294,7 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 | `sandwall_relay_connections_total` | `result` (`ok`, `denied`, `refused`, `error`) |
 | `sandwall_quarantined` (gauge) | |
 | `sandwall_auto_quarantines_total` | |
+| `sandwall_webhook_deliveries_total` | `webhook`, `result` (`ok`, `error`, `dropped`); no `sandbox` label |
 
 ## Threat model
 
@@ -292,7 +333,7 @@ Open work and verification still owed are tracked in [TODO.md](TODO.md).
 ```sh
 make test         # unit tests: policy parsing, allowlist matching, DNS proxy, golden nftables rulesets
 make vet fmt-check
-make e2e          # root-only acceptance tests for M1-M3, the SNI check (S1), quarantine and proxy mode (M3 needs /dev/kvm); run in a disposable VM
+make e2e          # root-only acceptance tests for M1-M3, the SNI check (S1), quarantine, alerts (S2) and proxy mode (M3 needs /dev/kvm); run in a disposable VM
 make e2e REAL_PROXY=http://host:port         # on a host without direct internet: every daemon uses the site proxy,
                                              # and e2e-proxy also fetches real sites through it
 ```

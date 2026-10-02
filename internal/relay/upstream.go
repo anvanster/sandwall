@@ -19,8 +19,9 @@ const (
 
 // Upstream is the HTTP proxy that carries proxied sandboxes' traffic.
 type Upstream struct {
-	addr string // host:port
-	auth string // Proxy-Authorization value, empty without credentials
+	addr string   // host:port
+	auth string   // Proxy-Authorization value, empty without credentials
+	url  *url.URL // as configured, with credentials
 }
 
 // ParseUpstream parses http://[user:pass@]host:port. Only plain-HTTP
@@ -39,13 +40,17 @@ func ParseUpstream(raw string) (*Upstream, error) {
 	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("upstream proxy %q: unexpected path or query", redact(raw))
 	}
-	up := &Upstream{addr: net.JoinHostPort(u.Hostname(), u.Port())}
+	up := &Upstream{addr: net.JoinHostPort(u.Hostname(), u.Port()), url: u}
 	if u.User != nil {
 		pass, _ := u.User.Password()
 		up.auth = "Basic " + base64.StdEncoding.EncodeToString([]byte(u.User.Username()+":"+pass))
 	}
 	return up, nil
 }
+
+// URL returns the proxy URL, credentials included, for the daemon's own
+// HTTP clients.
+func (u *Upstream) URL() *url.URL { c := *u.url; return &c }
 
 // String returns the proxy address without credentials.
 func (u *Upstream) String() string { return "http://" + u.addr }

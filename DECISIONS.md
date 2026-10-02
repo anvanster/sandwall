@@ -408,6 +408,35 @@ Lint errors name the list version.
 Exact names that serve many users' content (`raw.githubusercontent.com`, `gist.github.com`) are single names to the lint; the README lists them as a known gap.
 The project's own demo policy used `*.githubusercontent.com` and failed the lint; it now lists exact names.
 
+## S2: policy-violation webhooks
+
+### Endpoints on the daemon, selection in the policy
+Webhook URLs and signing keys are daemon flags (`--webhook name=URL`, `--webhook-secret name=file`); policies refer to endpoints by name.
+Policies are stored in the state directory and returned by `sandbox list --json`, so they are the wrong place for credentials, and an operator who may change a policy should not be able to point alerts at an arbitrary URL.
+A policy naming an endpoint the daemon lacks is rejected at create and apply; at restore it is a warning, like the allowlist lint.
+
+### What is sent
+The same vocabulary as quarantine triggers (firewall denies, relay refusals, `dns_refused`, `dns_ratelimited`), plus `quarantine` for quarantine and release events; by default all of them.
+Events are the log's own JSON objects, so a receiver sees exactly what `sandwall logs` shows, and they pass through the same de-duplication.
+
+### Delivery
+The event sink calls the dispatcher for every logged event, on the data path of the deny collector, DNS proxy and relay, so `Observe` never blocks: each endpoint has a 1000-event queue, overflow is counted (`dropped` result) and reported in the next payload.
+One goroutine per endpoint batches up to 100 events or 2 seconds, and flushes at once on a quarantine event, which is the one an operator must see immediately.
+A delivery is tried three times (1 s, then 2 s apart); after that it is counted as an error and dropped, as the events remain in the sandbox log.
+On daemon stop, queued events get up to 10 seconds to go out.
+
+### Signing
+`X-Sandwall-Signature: sha256=HMAC(key, "<X-Sandwall-Timestamp>.<body>")`, the scheme common webhook providers use, so a receiver can authenticate the sender and reject replays by timestamp.
+Keys come from files so they stay out of process listings; shorter than 16 bytes is rejected.
+Endpoints without a key are allowed (for local receivers) and are simply unsigned.
+
+### Proxy
+On a host behind an HTTP proxy, the daemon itself cannot reach external receivers directly either, so webhooks use the upstream proxy when one is configured, except to loopback addresses and `no_proxy` destinations.
+
+### Testing
+`test/e2e/alerts.sh` runs a receiver on host loopback that verifies every signature, and checks delivery, reason and sandbox filtering, the immediate quarantine flush, release events, retries after two failures, an unreachable receiver counted as an error, and rejection of a policy naming an unknown endpoint.
+It passes with and without an upstream proxy.
+
 ## Name
 
 The project was developed as `egressd` and renamed to `sandwall` before its first release.

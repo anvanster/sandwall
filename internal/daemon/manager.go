@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,6 +25,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/anvanster/sandwall/internal/addressing"
+	"github.com/anvanster/sandwall/internal/alert"
 	"github.com/anvanster/sandwall/internal/dnsproxy"
 	"github.com/anvanster/sandwall/internal/fc"
 	"github.com/anvanster/sandwall/internal/flowlog"
@@ -71,6 +74,8 @@ type Options struct {
 	UpstreamProxy *relay.Upstream
 	// NoProxy lists destinations that bypass UpstreamProxy.
 	NoProxy relay.NoProxy
+	// Webhooks are the endpoints policies can send alerts to.
+	Webhooks []alert.Endpoint
 	// SNICheck sends allowed TCP to ports 80 and 443 through the relay,
 	// which checks the TLS SNI or HTTP Host against the allowlist. With an
 	// upstream proxy the relay sees all TCP anyway.
@@ -154,6 +159,7 @@ type Manager struct {
 	sink *flowlog.Sink
 	m    *metrics.Metrics
 	wd   *watchdog.Watchdog
+	al   *alert.Dispatcher
 
 	// opMu serializes lifecycle operations, which may take seconds (VM
 	// boot, image copies). mu only guards the maps, so log collectors'
@@ -201,7 +207,16 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 		byID: map[string]*sandbox{}, byIndex: map[int]*sandbox{},
 	}
 	mgr.wd = watchdog.New(mgr.autoQuarantine)
-	sink.SetObserver(mgr.wd.Observe)
+	mgr.al = alert.New(alert.Config{
+		Endpoints: opts.Webhooks,
+		Proxy:     webhookProxy(opts.UpstreamProxy, opts.NoProxy),
+		Count:     func(name, result string) { mgr.m.WebhookDeliveries.WithLabelValues(name, result).Inc() },
+		Log:       opts.Log,
+	})
+	sink.SetObserver(func(ev flowlog.Event) {
+		mgr.wd.Observe(ev)
+		mgr.al.Observe(ev)
+	})
 	if err := mgr.ensureHost(ctx); err != nil {
 		return nil, err
 	}
@@ -324,6 +339,9 @@ func (mgr *Manager) restore(ctx context.Context) error {
 		if err := pol.Lint(); err != nil {
 			mgr.log.Warn("stored policy fails the allowlist lint; fix it with policy apply", "id", rec.ID, "err", err)
 		}
+		if err := mgr.checkWebhooks(pol); err != nil {
+			mgr.log.Warn("stored policy names webhooks this daemon lacks; their alerts are not sent", "id", rec.ID, "err", err)
+		}
 		if err := mgr.setup(ctx, rec, pol, true); err != nil {
 			mgr.log.Error("failed to restore sandbox", "id", rec.ID, "err", err)
 			continue
@@ -361,8 +379,9 @@ func (mgr *Manager) Create(ctx context.Context, id, mode, policyYAML, vmConfig s
 }
 
 // parseNew parses a policy submitted for a new sandbox or a policy apply,
-// which must also pass the allowlist lint.
-func parseNew(yaml string) (*policy.Policy, error) {
+// which must also pass the allowlist lint and name only webhooks this
+// daemon has.
+func (mgr *Manager) parseNew(yaml string) (*policy.Policy, error) {
 	pol, err := policy.Parse([]byte(yaml))
 	if err != nil {
 		return nil, err
@@ -370,7 +389,49 @@ func parseNew(yaml string) (*policy.Policy, error) {
 	if err := pol.Lint(); err != nil {
 		return nil, err
 	}
+	if err := mgr.checkWebhooks(pol); err != nil {
+		return nil, err
+	}
 	return pol, nil
+}
+
+func (mgr *Manager) checkWebhooks(pol *policy.Policy) error {
+	if pol.Alerts == nil {
+		return nil
+	}
+	var errs []error
+	for _, n := range pol.Alerts.Webhooks {
+		if !mgr.al.Has(n) {
+			errs = append(errs, fmt.Errorf("alerts.webhooks: no webhook %q is configured on the daemon (daemon --webhook %s=URL)", n, n))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// webhookProxy sends webhook requests through the upstream proxy, if
+// there is one, except to loopback and no_proxy destinations.
+func webhookProxy(up *relay.Upstream, np relay.NoProxy) func(*http.Request) (*url.URL, error) {
+	if up == nil {
+		return nil
+	}
+	direct := dnsproxy.NewAllowlist(np.Patterns)
+	return func(r *http.Request) (*url.URL, error) {
+		host := r.URL.Hostname()
+		if host == "localhost" || direct.Allows(host) {
+			return nil, nil
+		}
+		if a, err := netip.ParseAddr(host); err == nil {
+			if a.IsLoopback() {
+				return nil, nil
+			}
+			for _, p := range np.CIDRs {
+				if p.Contains(a.Unmap()) {
+					return nil, nil
+				}
+			}
+		}
+		return up.URL(), nil
+	}
 }
 
 // MaxStagger bounds the pause between clone starts.
@@ -427,7 +488,7 @@ func (mgr *Manager) create(ctx context.Context, rec Record) (Info, error) {
 	if !idPattern.MatchString(rec.ID) {
 		return Info{}, fmt.Errorf("invalid sandbox id %q: use 1-63 of [a-zA-Z0-9_.-], starting alphanumeric", rec.ID)
 	}
-	pol, err := parseNew(rec.Policy)
+	pol, err := mgr.parseNew(rec.Policy)
 	if err != nil {
 		return Info{}, err
 	}
@@ -572,6 +633,7 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 		mgr.m.Quarantined.WithLabelValues(rec.ID).Set(1)
 	}
 	mgr.wd.Set(rec.ID, pol.Quarantine, rec.Quarantine == nil)
+	mgr.al.Set(rec.ID, pol.Alerts)
 
 	// The VM starts last: its DNS and policy are in place before it boots.
 	if rec.Mode == ModeVM && !(restoring && vm.Alive()) {
@@ -661,7 +723,7 @@ func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry, direct 
 // the allow sets flushed and repopulated in one transaction, so established
 // flows survive. tc and Firecracker limits follow.
 func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Info, error) {
-	pol, err := parseNew(policyYAML)
+	pol, err := mgr.parseNew(policyYAML)
 	if err != nil {
 		return Info{}, err
 	}
@@ -710,6 +772,7 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 	s.rec, s.policy = rec, pol
 	mgr.mu.Unlock()
 	mgr.wd.Set(id, pol.Quarantine, rec.Quarantine == nil)
+	mgr.al.Set(id, pol.Alerts)
 	mgr.log.Info("applied policy", "id", id)
 	return mgr.Get(id)
 }
@@ -954,6 +1017,7 @@ func (mgr *Manager) Nuke(ctx context.Context) error {
 	for id, s := range all {
 		s.stop()
 		mgr.wd.Remove(id)
+		mgr.al.Remove(id)
 		_ = mgr.sink.Close(id)
 		mgr.m.Forget(id)
 	}
@@ -1009,6 +1073,7 @@ func (mgr *Manager) unregister(id string, k int) {
 		s.stop()
 	}
 	mgr.wd.Remove(id)
+	mgr.al.Remove(id)
 	delete(mgr.byID, id)
 	delete(mgr.byIndex, k)
 }
@@ -1069,11 +1134,12 @@ func (mgr *Manager) Sink() *flowlog.Sink { return mgr.sink }
 // the proxy their DNS fails closed.
 func (mgr *Manager) Close() {
 	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
 	for _, s := range mgr.byID {
 		s.stop()
 	}
 	mgr.sink.CloseAll()
+	mgr.mu.Unlock()
+	mgr.al.Close() // deliver queued alerts, bounded
 }
 
 func (mgr *Manager) info(s *sandbox) Info {

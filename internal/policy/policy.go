@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,7 +35,21 @@ type Policy struct {
 	UpstreamDNS string `yaml:"upstream_dns,omitempty" json:"upstream_dns,omitempty"`
 	// Quarantine configures automatic quarantine; nil means none.
 	Quarantine *Quarantine `yaml:"quarantine,omitempty" json:"quarantine,omitempty"`
+	// Alerts sends policy violations to webhooks; nil means none.
+	Alerts *Alerts `yaml:"alerts,omitempty" json:"alerts,omitempty"`
 }
+
+// Alerts selects which of the daemon's named webhooks receive this
+// sandbox's violations, and which ones.
+type Alerts struct {
+	// Webhooks are endpoint names configured with daemon --webhook.
+	Webhooks []string `yaml:"webhooks" json:"webhooks"`
+	// Reasons are TriggerReasons plus AlertQuarantine; empty means all.
+	Reasons []string `yaml:"reasons,omitempty" json:"reasons,omitempty"`
+}
+
+// AlertQuarantine selects quarantine events (quarantined and released).
+const AlertQuarantine = "quarantine"
 
 // Quarantine quarantines the sandbox automatically when any trigger fires.
 type Quarantine struct {
@@ -243,8 +258,41 @@ func (p *Policy) normalize() error {
 		}
 	}
 
+	if a := p.Alerts; a != nil {
+		if len(a.Webhooks) == 0 {
+			errs = append(errs, errors.New("alerts.webhooks: needs at least one webhook name"))
+		}
+		var names []string
+		for _, n := range a.Webhooks {
+			n = strings.ToLower(strings.TrimSpace(n))
+			if !webhookName.MatchString(n) {
+				errs = append(errs, fmt.Errorf("alerts.webhooks: %q is not a webhook name (letters, digits, - and _)", n))
+			} else if !slices.Contains(names, n) {
+				names = append(names, n)
+			}
+		}
+		a.Webhooks = names
+		var reasons []string
+		for _, r := range a.Reasons {
+			r = strings.ToLower(strings.TrimSpace(r))
+			switch {
+			case r != AlertQuarantine && !slices.Contains(TriggerReasons, r):
+				errs = append(errs, fmt.Errorf("alerts.reasons: unknown reason %q (%s, or %s)", r, AlertQuarantine, strings.Join(TriggerReasons, ", ")))
+			case !slices.Contains(reasons, r):
+				reasons = append(reasons, r)
+			}
+		}
+		a.Reasons = reasons
+	}
+
 	return errors.Join(errs...)
 }
+
+// webhookName is the syntax of daemon --webhook names.
+var webhookName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+
+// ValidWebhookName reports whether s can name a webhook.
+func ValidWebhookName(s string) bool { return webhookName.MatchString(s) }
 
 // MultitenantWildcard is an allow_domains wildcard over a public suffix:
 // it matches names that unrelated parties control.

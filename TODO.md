@@ -27,7 +27,7 @@ Detection without a working kill switch is half a control: today nothing acts on
 
 ## Features
 
-- [ ] **S2:** per-sandbox policy-violation webhooks.
+- [x] **S2:** per-sandbox policy-violation webhooks.
 - [ ] **S3:** OTel log export.
 - [ ] **Synthetic DNS** for proxy-only networks whose resolver answers internal names only (design in DECISIONS.md, "Upstream proxy" / DNS).
 - [ ] **SNI check ports:** only 80 and 443 go through the relay in direct mode; consider making the list configurable.

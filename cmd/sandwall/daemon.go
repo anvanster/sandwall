@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/anvanster/sandwall/internal/alert"
 	"github.com/anvanster/sandwall/internal/api"
 	"github.com/anvanster/sandwall/internal/daemon"
 	"github.com/anvanster/sandwall/internal/fc"
@@ -33,6 +34,8 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 		proxyEnv    bool
 		noProxy     string
 		sniCheck    bool
+		webhooks    []string
+		secrets     []string
 	)
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -83,7 +86,11 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, sniCheck)
+			eps, err := alert.ParseEndpoints(webhooks, secrets)
+			if err != nil {
+				return err
+			}
+			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, sniCheck, eps)
 		},
 	}
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", ":9464", "Prometheus listen address (empty to disable)")
@@ -95,6 +102,8 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().StringVar(&proxyURL, "upstream-proxy", "", "carry allowed sandbox TCP through this HTTP proxy, http://[user:pass@]host:port")
 	cmd.Flags().BoolVar(&proxyEnv, "upstream-proxy-from-env", false, "take --upstream-proxy from https_proxy or http_proxy, and --no-proxy from no_proxy")
 	cmd.Flags().BoolVar(&sniCheck, "sni-check", true, "check the TLS SNI or HTTP Host of allowed connections to ports 80 and 443 against the allowlist (--sni-check=false to forward them unchecked)")
+	cmd.Flags().StringArrayVar(&webhooks, "webhook", nil, "name=URL of a webhook that policies can send alerts to (repeatable)")
+	cmd.Flags().StringArrayVar(&secrets, "webhook-secret", nil, "name=file holding the HMAC-SHA256 key that signs that webhook's requests (repeatable)")
 	cmd.Flags().StringVar(&noProxy, "no-proxy", "", "comma-separated names, IPv4 addresses and CIDRs that bypass the upstream proxy (no_proxy syntax)")
 	return cmd
 }
@@ -128,7 +137,7 @@ func envFirst(names ...string) string {
 }
 
 func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths,
-	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, sniCheck bool) error {
+	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, sniCheck bool, webhooks []alert.Endpoint) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(exempt) > 0 {
 		log.Warn("blocked ranges have exemptions; do not use in production", "exempt", exempt)
@@ -149,6 +158,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		UpstreamProxy:   proxy,
 		NoProxy:         noProxy,
 		SNICheck:        sniCheck,
+		Webhooks:        webhooks,
 		FC:              paths,
 		Log:             log,
 		Metrics:         m,
