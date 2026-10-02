@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,6 +22,7 @@ import (
 	"github.com/anvanster/sandwall/internal/fc"
 	"github.com/anvanster/sandwall/internal/flowlog"
 	"github.com/anvanster/sandwall/internal/metrics"
+	"github.com/anvanster/sandwall/internal/otelexport"
 	"github.com/anvanster/sandwall/internal/relay"
 )
 
@@ -36,6 +38,9 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 		sniCheck    bool
 		webhooks    []string
 		secrets     []string
+		otlpURL     string
+		otlpHeaders []string
+		otlpEvents  string
 	)
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -90,7 +95,11 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, sniCheck, eps)
+			otlp, err := otlpConfig(otlpURL, otlpHeaders, otlpEvents)
+			if err != nil {
+				return err
+			}
+			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, sniCheck, eps, otlp)
 		},
 	}
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", ":9464", "Prometheus listen address (empty to disable)")
@@ -104,6 +113,9 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&sniCheck, "sni-check", true, "check the TLS SNI or HTTP Host of allowed connections to ports 80 and 443 against the allowlist (--sni-check=false to forward them unchecked)")
 	cmd.Flags().StringArrayVar(&webhooks, "webhook", nil, "name=URL of a webhook that policies can send alerts to (repeatable)")
 	cmd.Flags().StringArrayVar(&secrets, "webhook-secret", nil, "name=file holding the HMAC-SHA256 key that signs that webhook's requests (repeatable)")
+	cmd.Flags().StringVar(&otlpURL, "otlp-endpoint", "", "export events as OpenTelemetry logs to this OTLP/HTTP endpoint (base URL, /v1/logs is appended)")
+	cmd.Flags().StringArrayVar(&otlpHeaders, "otlp-header", nil, "key=value header sent with OTLP requests, e.g. authorization (repeatable)")
+	cmd.Flags().StringVar(&otlpEvents, "otlp-events", "all", "which events to export: all, or violations")
 	cmd.Flags().StringVar(&noProxy, "no-proxy", "", "comma-separated names, IPv4 addresses and CIDRs that bypass the upstream proxy (no_proxy syntax)")
 	return cmd
 }
@@ -126,6 +138,35 @@ func upstreamProxy(raw string, fromEnv bool) (*relay.Upstream, error) {
 	return relay.ParseUpstream(raw)
 }
 
+// otlpConfig validates the OTLP flags; nil means no export.
+func otlpConfig(endpoint string, headers []string, events string) (*otelexport.Config, error) {
+	if endpoint == "" {
+		if len(headers) > 0 || events != "all" {
+			return nil, errors.New("--otlp-header and --otlp-events need --otlp-endpoint")
+		}
+		return nil, nil
+	}
+	if _, err := otelexport.LogsURL(endpoint); err != nil {
+		return nil, err
+	}
+	cfg := &otelexport.Config{Endpoint: endpoint, Headers: map[string]string{}}
+	switch events {
+	case "all":
+	case "violations":
+		cfg.ViolationsOnly = true
+	default:
+		return nil, fmt.Errorf("--otlp-events %q: want all or violations", events)
+	}
+	for _, h := range headers {
+		k, v, ok := strings.Cut(h, "=")
+		if !ok || strings.TrimSpace(k) == "" {
+			return nil, fmt.Errorf("--otlp-header %q: want key=value", h)
+		}
+		cfg.Headers[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return cfg, nil
+}
+
 // envFirst returns the first non-empty environment variable of names.
 func envFirst(names ...string) string {
 	for _, n := range names {
@@ -137,7 +178,7 @@ func envFirst(names ...string) string {
 }
 
 func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths,
-	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, sniCheck bool, webhooks []alert.Endpoint) error {
+	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, sniCheck bool, webhooks []alert.Endpoint, otlp *otelexport.Config) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(exempt) > 0 {
 		log.Warn("blocked ranges have exemptions; do not use in production", "exempt", exempt)
@@ -159,6 +200,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		NoProxy:         noProxy,
 		SNICheck:        sniCheck,
 		Webhooks:        webhooks,
+		OTLP:            otlp,
 		FC:              paths,
 		Log:             log,
 		Metrics:         m,

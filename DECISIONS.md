@@ -437,6 +437,27 @@ On a host behind an HTTP proxy, the daemon itself cannot reach external receiver
 `test/e2e/alerts.sh` runs a receiver on host loopback that verifies every signature, and checks delivery, reason and sandbox filtering, the immediate quarantine flush, release events, retries after two failures, an unreachable receiver counted as an error, and rejection of a policy naming an unknown endpoint.
 It passes with and without an upstream proxy.
 
+## S3: OpenTelemetry log export
+
+### Official SDK over OTLP/HTTP
+Events are exported with the OpenTelemetry Go SDK's log provider and its OTLP/HTTP exporter (protobuf, gzip), rather than a hand-written encoder: the SDK brings batching, retries, and the standard `OTEL_EXPORTER_OTLP_*` configuration (headers, TLS, timeouts) that collector operators expect.
+OTLP/HTTP rather than gRPC, because it goes through HTTP proxies like the daemon's other requests.
+Cost: the binary grows by about 5 MB (23 to 28 MB), partly because the OTLP protobuf package the HTTP exporter needs also carries the generated gRPC service definitions, so gRPC is linked in even though it is never used.
+
+### What a record looks like
+The event type becomes the record's event name (`sandwall.deny`, ...), its time the record time, and its fields attributes.
+Fields with an OpenTelemetry semantic convention use it (`destination.address`, `destination.port`, `network.transport`, `dns.question.name`, `tls.client.server_name`, `source.port`); the rest are namespaced `sandwall.*`, so they cannot collide with conventions added later.
+Severity: `INFO` for allowed events, `WARN` for denials and refusals, `ERROR` for a quarantine.
+The body is a one-line summary for log viewers that show only bodies.
+
+### Selection and back-pressure
+`--otlp-events all` (default) exports every event, as the JSONL log has them; `violations` uses the alert vocabulary.
+The event sink calls the exporter on the data path, and the SDK's batch processor drops records rather than block when its queue is full; the JSONL log stays the record of truth.
+On shutdown the provider gets 10 seconds to export what is queued.
+
+### Testing
+`test/e2e/otel.sh` runs `test/e2e/otlpsink`, a small Go OTLP/HTTP receiver that decodes the protobuf, and checks DNS, flow, deny, refusal and quarantine records with their attributes, severities, resource and headers, `--otlp-events violations`, the flush at shutdown, and that an unreachable collector does not affect sandboxes.
+
 ## Name
 
 The project was developed as `egressd` and renamed to `sandwall` before its first release.

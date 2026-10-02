@@ -296,6 +296,23 @@ Prometheus metrics on `:9464/metrics`, all labeled `sandbox`:
 | `sandwall_auto_quarantines_total` | |
 | `sandwall_webhook_deliveries_total` | `webhook`, `result` (`ok`, `error`, `dropped`); no `sandbox` label |
 
+### OpenTelemetry
+
+The same events can be exported as OpenTelemetry log records over OTLP/HTTP (protobuf, gzip), to a collector or any OTLP backend:
+
+```sh
+sudo bin/sandwall daemon --otlp-endpoint https://otel-collector:4318 \
+    --otlp-header "Authorization=Bearer $TOKEN" [--otlp-events violations]
+```
+
+`--otlp-endpoint` is a base URL to which `/v1/logs` is appended, or a full URL with a path; the standard `OTEL_EXPORTER_OTLP_*` variables for headers, TLS and timeouts also apply.
+`--otlp-events violations` exports only what a quarantine trigger or alert could count, plus quarantines; the default is every event.
+
+Each record has the event type as its event name (`sandwall.dns`, `sandwall.flow`, `sandwall.deny`, `sandwall.relay`, `sandwall.quarantine`), the event's time, a one-line body, severity `INFO` (allowed), `WARN` (denied or refused) or `ERROR` (quarantined), and the event's fields as attributes: semantic-convention names where they exist (`destination.address`, `destination.port`, `network.transport`, `dns.question.name`, `tls.client.server_name`, `source.port`) and `sandwall.*` otherwise (`sandwall.sandbox.id`, `sandwall.reason`, `sandwall.verdict`, `sandwall.bytes_in`, ...).
+The resource has `service.name=sandwall` and `host.name`.
+Export is batched by the OpenTelemetry SDK and never blocks the data path: when the collector is slow or down, records are dropped (and the drop is logged), while the JSONL logs are unaffected.
+With an upstream proxy, export goes through it, except to loopback and `no_proxy` destinations.
+
 ## Threat model
 
 **In scope:** code running inside a sandbox, including as root inside a VM guest, that wants to send data somewhere it should not, or reach the host, its network, cloud metadata or other sandboxes.
@@ -333,7 +350,7 @@ Open work and verification still owed are tracked in [TODO.md](TODO.md).
 ```sh
 make test         # unit tests: policy parsing, allowlist matching, DNS proxy, golden nftables rulesets
 make vet fmt-check
-make e2e          # root-only acceptance tests for M1-M3, the SNI check (S1), quarantine, alerts (S2) and proxy mode (M3 needs /dev/kvm); run in a disposable VM
+make e2e          # root-only acceptance tests for M1-M3, the SNI check (S1), quarantine, alerts (S2), OTel export (S3) and proxy mode (M3 needs /dev/kvm); run in a disposable VM
 make e2e REAL_PROXY=http://host:port         # on a host without direct internet: every daemon uses the site proxy,
                                              # and e2e-proxy also fetches real sites through it
 ```

@@ -32,6 +32,7 @@ import (
 	"github.com/anvanster/sandwall/internal/metrics"
 	"github.com/anvanster/sandwall/internal/netns"
 	"github.com/anvanster/sandwall/internal/nft"
+	"github.com/anvanster/sandwall/internal/otelexport"
 	"github.com/anvanster/sandwall/internal/policy"
 	"github.com/anvanster/sandwall/internal/relay"
 	"github.com/anvanster/sandwall/internal/shaper"
@@ -76,6 +77,9 @@ type Options struct {
 	NoProxy relay.NoProxy
 	// Webhooks are the endpoints policies can send alerts to.
 	Webhooks []alert.Endpoint
+	// OTLP, when set, exports every logged event as an OpenTelemetry log
+	// record. Its Proxy and Log are filled in by the manager.
+	OTLP *otelexport.Config
 	// SNICheck sends allowed TCP to ports 80 and 443 through the relay,
 	// which checks the TLS SNI or HTTP Host against the allowlist. With an
 	// upstream proxy the relay sees all TCP anyway.
@@ -160,6 +164,7 @@ type Manager struct {
 	m    *metrics.Metrics
 	wd   *watchdog.Watchdog
 	al   *alert.Dispatcher
+	otlp *otelexport.Exporter // nil without OTLP export
 
 	// opMu serializes lifecycle operations, which may take seconds (VM
 	// boot, image copies). mu only guards the maps, so log collectors'
@@ -209,13 +214,23 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 	mgr.wd = watchdog.New(mgr.autoQuarantine)
 	mgr.al = alert.New(alert.Config{
 		Endpoints: opts.Webhooks,
-		Proxy:     webhookProxy(opts.UpstreamProxy, opts.NoProxy),
+		Proxy:     hostProxy(opts.UpstreamProxy, opts.NoProxy),
 		Count:     func(name, result string) { mgr.m.WebhookDeliveries.WithLabelValues(name, result).Inc() },
 		Log:       opts.Log,
 	})
+	if opts.OTLP != nil {
+		cfg := *opts.OTLP
+		cfg.Proxy, cfg.Log = hostProxy(opts.UpstreamProxy, opts.NoProxy), opts.Log
+		if mgr.otlp, err = otelexport.New(ctx, cfg); err != nil {
+			return nil, err
+		}
+	}
 	sink.SetObserver(func(ev flowlog.Event) {
 		mgr.wd.Observe(ev)
 		mgr.al.Observe(ev)
+		if mgr.otlp != nil {
+			mgr.otlp.Observe(ev)
+		}
 	})
 	if err := mgr.ensureHost(ctx); err != nil {
 		return nil, err
@@ -408,9 +423,10 @@ func (mgr *Manager) checkWebhooks(pol *policy.Policy) error {
 	return errors.Join(errs...)
 }
 
-// webhookProxy sends webhook requests through the upstream proxy, if
-// there is one, except to loopback and no_proxy destinations.
-func webhookProxy(up *relay.Upstream, np relay.NoProxy) func(*http.Request) (*url.URL, error) {
+// hostProxy routes the daemon's own HTTP requests (webhooks, OTLP)
+// through the upstream proxy, if there is one, except to loopback and
+// no_proxy destinations.
+func hostProxy(up *relay.Upstream, np relay.NoProxy) func(*http.Request) (*url.URL, error) {
 	if up == nil {
 		return nil
 	}
@@ -1140,7 +1156,17 @@ func (mgr *Manager) Close() {
 	mgr.sink.CloseAll()
 	mgr.mu.Unlock()
 	mgr.al.Close() // deliver queued alerts, bounded
+	if mgr.otlp != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), otlpShutdownTimeout)
+		defer cancel()
+		if err := mgr.otlp.Shutdown(ctx); err != nil {
+			mgr.log.Warn("otlp export at shutdown", "err", err)
+		}
+	}
 }
+
+// otlpShutdownTimeout bounds exporting queued log records at shutdown.
+const otlpShutdownTimeout = 10 * time.Second
 
 func (mgr *Manager) info(s *sandbox) Info {
 	mgr.mu.Lock()
