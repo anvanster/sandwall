@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -29,6 +31,15 @@ func newSandboxCmd(g *globalFlags) *cobra.Command {
 	cmd.AddCommand(newSandboxCreateCmd(g), newSandboxExecCmd(g), newSandboxListCmd(g), newSandboxDestroyCmd(g),
 		newSandboxQuarantineCmd(g), newSandboxReleaseCmd(g))
 	return cmd
+}
+
+// createTimeout: a VM-mode create copies the kernel and disks and boots the
+// VM, which can outlast the default request deadline on a slow disk.
+func createTimeout(mode string) time.Duration {
+	if mode == daemon.ModeVM {
+		return 5 * time.Minute
+	}
+	return api.DefaultTimeout
 }
 
 func newSandboxCreateCmd(g *globalFlags) *cobra.Command {
@@ -51,7 +62,9 @@ func newSandboxCreateCmd(g *globalFlags) *cobra.Command {
 				req.VMConfig = string(data)
 			}
 			var info daemon.Info
-			if err := api.NewClient(g.socket).Do(cmd.Context(), http.MethodPost, "/v1/sandboxes", req, &info); err != nil {
+			ctx, cancel := context.WithTimeout(cmd.Context(), createTimeout(mode))
+			defer cancel()
+			if err := api.NewClient(g.socket).Do(ctx, http.MethodPost, "/v1/sandboxes", req, &info); err != nil {
 				return err
 			}
 			if info.VM != nil {

@@ -68,6 +68,20 @@ type ErrorResponse struct {
 // ErrDaemonUnavailable means nothing is listening on the socket.
 var ErrDaemonUnavailable = errors.New("sandwall daemon is not running")
 
+// DefaultTimeout bounds a request whose context has no deadline. Operations
+// that can legitimately take longer (VM create, snapshot, clone) pass a
+// context with their own deadline.
+const DefaultTimeout = 60 * time.Second
+
+// WithDefaultDeadline returns ctx, with DefaultTimeout applied if it has no
+// deadline yet.
+func WithDefaultDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, DefaultTimeout)
+}
+
 // Client talks to the daemon.
 type Client struct {
 	http *http.Client
@@ -75,8 +89,9 @@ type Client struct {
 
 // NewClient returns a client for the daemon socket.
 func NewClient(socket string) *Client {
+	// No http.Client timeout: it would cap every request, including long
+	// ones, and a client that gives up makes the daemon cancel the operation.
 	return &Client{http: &http.Client{
-		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
@@ -88,6 +103,8 @@ func NewClient(socket string) *Client {
 
 // Do sends a request and decodes a JSON response into out (if non-nil).
 func (c *Client) Do(ctx context.Context, method, path string, in, out any) error {
+	ctx, cancel := WithDefaultDeadline(ctx)
+	defer cancel()
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)

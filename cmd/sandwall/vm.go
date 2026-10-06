@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,18 @@ import (
 	"github.com/anvanster/sandwall/internal/api"
 	"github.com/anvanster/sandwall/internal/daemon"
 )
+
+// Deadlines for long VM operations; the CLI otherwise uses api.DefaultTimeout.
+// Giving up early would make the daemon cancel the operation part way.
+const (
+	snapshotTimeout = 15 * time.Minute // pauses the VM and copies its disks
+	perCloneTimeout = 2 * time.Minute  // copy disks, start the VMM, restore
+)
+
+// cloneTimeout covers count clones started stagger apart.
+func cloneTimeout(count int, stagger time.Duration) time.Duration {
+	return time.Duration(count)*(stagger+perCloneTimeout) + api.DefaultTimeout
+}
 
 func newVMCmd(g *globalFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "vm", Short: "Snapshot and clone Firecracker sandboxes"}
@@ -34,7 +47,9 @@ func newVMSnapshotCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			err = api.NewClient(g.socket).Do(cmd.Context(), http.MethodPost, api.SandboxPath(args[0], "/snapshot"),
+			ctx, cancel := context.WithTimeout(cmd.Context(), snapshotTimeout)
+			defer cancel()
+			err = api.NewClient(g.socket).Do(ctx, http.MethodPost, api.SandboxPath(args[0], "/snapshot"),
 				api.SnapshotRequest{OutDir: abs}, nil)
 			if err != nil {
 				return err
@@ -69,7 +84,9 @@ func newVMCloneCmd(g *globalFlags) *cobra.Command {
 				return err
 			}
 			var resp api.CloneResponse
-			err = api.NewClient(g.socket).Do(cmd.Context(), http.MethodPost, "/v1/clones",
+			ctx, cancel := context.WithTimeout(cmd.Context(), cloneTimeout(count, stagger))
+			defer cancel()
+			err = api.NewClient(g.socket).Do(ctx, http.MethodPost, "/v1/clones",
 				api.CloneRequest{SnapshotDir: dir, Count: count, Prefix: prefix, Policy: string(pol), StaggerMs: stagger.Milliseconds()}, &resp)
 			if err != nil {
 				return err
