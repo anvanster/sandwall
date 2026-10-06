@@ -43,7 +43,16 @@ const (
 	// ReasonDialError: without an upstream proxy, the original destination
 	// did not accept the relay's connection.
 	ReasonDialError = "dial_error"
+	// ReasonSyntheticUnmapped: a connection to a synthetic DNS address that
+	// maps to no name (the mapping expired, or the daemon restarted) and that
+	// carries no allowlisted SNI or Host. The address itself means nothing
+	// to the proxy, so it is never used as a target.
+	ReasonSyntheticUnmapped = "synthetic_unmapped"
 )
+
+// nameMismatch is decide's verdict for a name that is not allowlisted; the
+// caller logs it as sni_mismatch or host_mismatch.
+const nameMismatch = "name_mismatch"
 
 // Results counted per relay decision.
 const (
@@ -77,7 +86,10 @@ type Config struct {
 	// Domain returns the allowlisted name the sandbox last resolved to an
 	// address, or "".
 	Domain func(netip.Addr) string
-	Sink   *flowlog.Sink
+	// Synthetic is the synthetic DNS pool, if that mode is on: addresses in
+	// it stand for names and are only ever forwarded by name.
+	Synthetic netip.Prefix
+	Sink      *flowlog.Sink
 	// Count is notified once per decision. reason is set for denials.
 	Count func(sandboxID, result, reason string)
 	Log   *slog.Logger
@@ -266,17 +278,23 @@ func (r *Relay) serve(c *net.TCPConn) {
 }
 
 // decide picks the proxy target host for a connection to dst. name is the
-// TLS SNI or HTTP Host, or "" when the client sent neither.
+// TLS SNI or HTTP Host, or "" when the client sent neither. reason is ""
+// when the connection may go ahead.
 //   - An allowlisted name is used as is: the proxy resolves it.
-//   - A name that is not allowlisted is refused, unless dst is inside
-//     allow_cidrs; then the address itself is the target, as the policy
-//     allows that address whatever name the client presents.
-//   - Without a name, the name the sandbox resolved to dst is used, else
-//     the address (the firewall already admitted it).
-func (r *Relay) decide(dst netip.Addr, name string) (host string, denied bool) {
+//   - A name that is not allowlisted is refused (nameMismatch), unless dst
+//     is inside allow_cidrs; then the address itself is the target, as the
+//     policy allows that address whatever name the client presents.
+//   - An IP literal means the address itself.
+//   - Without a name, the name the sandbox resolved to dst is used, else the
+//     address (the firewall already admitted it).
+//   - A synthetic DNS address is only ever a stand-in for its name: an IP
+//     literal falls back to its mapping, and without an allowlisted name or
+//     a live mapping it is refused.
+func (r *Relay) decide(dst netip.Addr, name string) (host, reason string) {
 	r.mu.RLock()
 	allow, cidrs := r.allow, r.cidrs
 	r.mu.RUnlock()
+	synthetic := r.cfg.Synthetic.IsValid() && r.cfg.Synthetic.Contains(dst)
 	inCIDRs := false
 	for _, p := range cidrs {
 		if p.Contains(dst) {
@@ -284,31 +302,40 @@ func (r *Relay) decide(dst netip.Addr, name string) (host string, denied bool) {
 			break
 		}
 	}
-	if name != "" {
-		if _, err := netip.ParseAddr(name); err == nil {
-			// An IP literal as Host or SNI: only the address matters.
-			return dst.String(), false
+	if _, err := netip.ParseAddr(name); err == nil {
+		// An IP literal as Host or SNI: only the address matters, unless it
+		// is a synthetic one, which only its mapped name gives meaning to.
+		if !synthetic {
+			return dst.String(), ""
 		}
+		name = ""
+	} else if name != "" {
 		if allow.Allows(name) {
-			return strings.ToLower(strings.TrimSuffix(name, ".")), false
+			return strings.ToLower(strings.TrimSuffix(name, ".")), ""
 		}
-		if inCIDRs {
-			return dst.String(), false
+		if inCIDRs && !synthetic {
+			return dst.String(), ""
 		}
-		return "", true
+		return "", nameMismatch
 	}
 	if d := r.cfg.Domain(dst); d != "" && allow.Allows(d) {
-		return d, false
+		return d, ""
 	}
-	return dst.String(), false
+	if synthetic {
+		return "", ReasonSyntheticUnmapped
+	}
+	return dst.String(), ""
 }
 
 // tunnel carries a connection through a CONNECT tunnel. prefix holds bytes
 // already consumed from the client (the ClientHello).
 func (r *Relay) tunnel(c *net.TCPConn, br *bufio.Reader, prefix []byte, dst netip.AddrPort, name string, ev flowlog.Event) {
-	host, denied := r.decide(dst.Addr(), name)
-	if denied {
-		r.deny(ev, ReasonSNIMismatch)
+	host, reason := r.decide(dst.Addr(), name)
+	if reason != "" {
+		if reason == nameMismatch {
+			reason = ReasonSNIMismatch
+		}
+		r.deny(ev, reason)
 		reset(c)
 		return
 	}
@@ -381,9 +408,12 @@ func (r *Relay) serveHTTP(c *net.TCPConn, br *bufio.Reader, dst netip.AddrPort, 
 			writeStatus(c, http.StatusMethodNotAllowed)
 			return
 		}
-		host, denied := r.decide(dst.Addr(), hostOnly(req.Host))
-		if denied {
-			r.deny(ev, ReasonHostMismatch)
+		host, reason := r.decide(dst.Addr(), hostOnly(req.Host))
+		if reason != "" {
+			if reason == nameMismatch {
+				reason = ReasonHostMismatch
+			}
+			r.deny(ev, reason)
 			writeStatus(c, http.StatusForbidden)
 			return
 		}
@@ -417,7 +447,7 @@ func (r *Relay) serveHTTP(c *net.TCPConn, br *bufio.Reader, dst netip.AddrPort, 
 			// WriteProxy builds the absolute-form request line from req.Host,
 			// so it must be the decided target too: otherwise an IP-literal
 			// Host (accepted as "the address") would send the proxy to any
-			// address.
+			// address, and a synthetic one to a meaningless pool address.
 			req.URL.Scheme, req.URL.Host, req.Host = "http", ev.Target, ev.Target
 			if a := r.cfg.Upstream.auth; a != "" {
 				req.Header.Set("Proxy-Authorization", a)

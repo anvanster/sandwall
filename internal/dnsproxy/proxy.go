@@ -1,8 +1,9 @@
 // Package dnsproxy runs one DNS listener per sandbox. Allowlisted names are
 // resolved upstream and their A records are inserted into the sandbox's
-// nftables allow set before the answer is returned. Every other name gets
-// REFUSED locally and is never forwarded, so query names cannot be used as
-// an exfiltration channel.
+// nftables allow set before the answer is returned; in synthetic mode they
+// are answered from an address pool instead (see synthetic.go). Every other
+// name gets REFUSED locally and is never forwarded, so query names cannot be
+// used as an exfiltration channel.
 package dnsproxy
 
 import (
@@ -57,6 +58,9 @@ type Settings struct {
 	// Direct holds no_proxy name patterns (Allowlist syntax). Addresses of
 	// allowlisted names that also match bypass the upstream proxy.
 	Direct []string
+	// Synthetic, when valid, answers allowlisted names that do not match
+	// Direct with addresses from this pool instead of resolving them.
+	Synthetic netip.Prefix
 }
 
 // Config identifies the sandbox a proxy serves.
@@ -78,6 +82,7 @@ type Proxy struct {
 	allow       *Allowlist
 	direct      *Allowlist
 	upstream    string
+	synthetic   netip.Prefix
 	limiter     *rate.Limiter
 	overLimitLg *rate.Limiter
 	quarantined bool
@@ -86,6 +91,8 @@ type Proxy struct {
 	// and repopulate the set from the cache.
 	setMu sync.Mutex
 	cache *cache
+	// synthNext is the next synthetic pool address to try; guarded by setMu.
+	synthNext netip.Addr
 
 	udp, tcp *dns.Server
 }
@@ -104,6 +111,7 @@ func (p *Proxy) apply(s Settings) {
 	p.allow = NewAllowlist(s.AllowDomains)
 	p.direct = NewAllowlist(s.Direct)
 	p.upstream = s.Upstream
+	p.synthetic = s.Synthetic
 	p.limiter = rate.NewLimiter(rate.Limit(qps), qps)
 }
 
@@ -206,7 +214,7 @@ func (p *Proxy) handle(r *dns.Msg, network string) (*dns.Msg, *flowlog.Event) {
 	}
 
 	p.mu.RLock()
-	allow, direct, upstream, limiter, quarantined := p.allow, p.direct, p.upstream, p.limiter, p.quarantined
+	allow, direct, upstream, synthetic, limiter, quarantined := p.allow, p.direct, p.upstream, p.synthetic, p.limiter, p.quarantined
 	p.mu.RUnlock()
 
 	if quarantined {
@@ -244,6 +252,10 @@ func (p *Proxy) handle(r *dns.Msg, network string) (*dns.Msg, *flowlog.Event) {
 		// ECH configs would defeat a future SNI check. Clients fall back to A.
 		ev.Verdict, ev.Reason = VerdictAllow, "svcb_suppressed"
 		return reply(r, dns.RcodeSuccess), ev
+	}
+
+	if synthetic.IsValid() && !direct.Allows(q.Name) {
+		return p.synthesize(r, q, ev, synthetic)
 	}
 
 	resp, err := p.forward(r, upstream, network)
@@ -285,11 +297,17 @@ func (p *Proxy) forward(r *dns.Msg, upstream, network string) (*dns.Msg, error) 
 }
 
 func (p *Proxy) insert(qname string, entries []nft.AllowEntry, direct bool) error {
+	p.setMu.Lock()
+	defer p.setMu.Unlock()
+	return p.insertLocked(qname, entries, direct)
+}
+
+// insertLocked adds entries to the allow (and direct) sets and the cache.
+// The caller holds setMu.
+func (p *Proxy) insertLocked(qname string, entries []nft.AllowEntry, direct bool) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	p.setMu.Lock()
-	defer p.setMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), insertTimeout)
 	defer cancel()
 	if err := p.cfg.Insert(ctx, p.cfg.Index, entries, direct); err != nil {
@@ -380,8 +398,10 @@ func (c *cache) reset() {
 	c.recent = map[netip.Addr]string{}
 }
 
+func normalizeName(qname string) string { return strings.ToLower(strings.TrimSuffix(qname, ".")) }
+
 func (c *cache) add(qname string, entries []nft.AllowEntry, now time.Time) {
-	name := strings.ToLower(strings.TrimSuffix(qname, "."))
+	name := normalizeName(qname)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, e := range entries {

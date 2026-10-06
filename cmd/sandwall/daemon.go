@@ -19,9 +19,11 @@ import (
 	"github.com/anvanster/sandwall/internal/alert"
 	"github.com/anvanster/sandwall/internal/api"
 	"github.com/anvanster/sandwall/internal/daemon"
+	"github.com/anvanster/sandwall/internal/dnsproxy"
 	"github.com/anvanster/sandwall/internal/fc"
 	"github.com/anvanster/sandwall/internal/flowlog"
 	"github.com/anvanster/sandwall/internal/metrics"
+	"github.com/anvanster/sandwall/internal/nft"
 	"github.com/anvanster/sandwall/internal/otelexport"
 	"github.com/anvanster/sandwall/internal/relay"
 )
@@ -35,6 +37,8 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 		proxyURL    string
 		proxyEnv    bool
 		noProxy     string
+		synthDNS    bool
+		synthPool   string
 		sniCheck    bool
 		webhooks    []string
 		secrets     []string
@@ -91,6 +95,10 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			synth, err := syntheticPool(synthDNS, cmd.Flags().Changed("synthetic-dns-pool"), synthPool, up, np, prefixes)
+			if err != nil {
+				return err
+			}
 			eps, err := alert.ParseEndpoints(webhooks, secrets)
 			if err != nil {
 				return err
@@ -99,7 +107,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, sniCheck, eps, otlp)
+			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, synth, sniCheck, eps, otlp)
 		},
 	}
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", ":9464", "Prometheus listen address (empty to disable)")
@@ -117,7 +125,38 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().StringArrayVar(&otlpHeaders, "otlp-header", nil, "key=value header sent with OTLP requests, e.g. authorization (repeatable)")
 	cmd.Flags().StringVar(&otlpEvents, "otlp-events", "all", "which events to export: all, or violations")
 	cmd.Flags().StringVar(&noProxy, "no-proxy", "", "comma-separated names, IPv4 addresses and CIDRs that bypass the upstream proxy (no_proxy syntax)")
+	cmd.Flags().BoolVar(&synthDNS, "synthetic-dns", false, "behind an upstream proxy whose network resolves internal names only: answer allowlisted names (except no_proxy ones) from --synthetic-dns-pool and let the proxy resolve them")
+	cmd.Flags().StringVar(&synthPool, "synthetic-dns-pool", dnsproxy.DefaultSyntheticPool.String(), "IPv4 range for --synthetic-dns answers; must not be a real destination")
 	return cmd
+}
+
+// syntheticPool validates --synthetic-dns and its pool. The pool must not
+// overlap a blocked range (the firewall would drop it), a no_proxy CIDR
+// (that traffic would go direct, to nowhere) or a --blocked-exempt range.
+func syntheticPool(enabled, poolSet bool, raw string, up *relay.Upstream, np relay.NoProxy, exempt []netip.Prefix) (netip.Prefix, error) {
+	if !enabled {
+		if poolSet {
+			return netip.Prefix{}, errors.New("--synthetic-dns-pool needs --synthetic-dns")
+		}
+		return netip.Prefix{}, nil
+	}
+	if up == nil {
+		return netip.Prefix{}, errors.New("--synthetic-dns needs --upstream-proxy or --upstream-proxy-from-env: only the proxy can resolve the names")
+	}
+	pool, err := netip.ParsePrefix(raw)
+	if err != nil || !pool.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("--synthetic-dns-pool %q: want an IPv4 CIDR", raw)
+	}
+	pool = pool.Masked()
+	if pool.Bits() > 24 {
+		return netip.Prefix{}, fmt.Errorf("--synthetic-dns-pool %s: too small, use /24 or larger", pool)
+	}
+	for _, r := range append(append(append([]netip.Prefix(nil), nft.DefaultBlockedRanges...), np.CIDRs...), exempt...) {
+		if pool.Overlaps(r) {
+			return netip.Prefix{}, fmt.Errorf("--synthetic-dns-pool %s overlaps %s", pool, r)
+		}
+	}
+	return pool, nil
 }
 
 // upstreamProxy resolves the proxy flags. With --upstream-proxy-from-env,
@@ -178,7 +217,7 @@ func envFirst(names ...string) string {
 }
 
 func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths,
-	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, sniCheck bool, webhooks []alert.Endpoint, otlp *otelexport.Config) error {
+	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, synthetic netip.Prefix, sniCheck bool, webhooks []alert.Endpoint, otlp *otelexport.Config) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(exempt) > 0 {
 		log.Warn("blocked ranges have exemptions; do not use in production", "exempt", exempt)
@@ -189,6 +228,9 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		for _, n := range noProxyNotes {
 			log.Warn("no_proxy entry", "note", n)
 		}
+		if synthetic.IsValid() {
+			log.Info("synthetic DNS: allowlisted names are answered from a pool and resolved by the proxy", "pool", synthetic)
+		}
 	}
 	m := metrics.New()
 	mgr, err := daemon.New(ctx, daemon.Options{
@@ -198,6 +240,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		DefaultUpstream: upstream,
 		UpstreamProxy:   proxy,
 		NoProxy:         noProxy,
+		SyntheticDNS:    synthetic,
 		SNICheck:        sniCheck,
 		Webhooks:        webhooks,
 		OTLP:            otlp,

@@ -283,8 +283,35 @@ If `no_proxy` changed since the previous run (the effective list is stored in th
 
 ### DNS
 Where the site resolver answers external names, nothing changes: the DNS proxy's upstream queries are host traffic.
-Where it resolves only internal names, a later `synthetic` DNS mode (not implemented yet) would answer allowlisted names with addresses from a per-sandbox pool, and the relay would map them back to names; the proxy does the real resolution.
+Where it resolves only internal names, `--synthetic-dns` answers allowlisted names from an address pool instead, and the proxy does the real resolution (next section).
 DNS still never carries a query for a name that is not allowlisted.
+
+### Synthetic DNS
+With `--synthetic-dns` (only with an upstream proxy), the DNS proxy answers A queries for allowlisted names from `--synthetic-dns-pool`, default `198.18.0.0/15`, and never asks the site resolver.
+That range is reserved for benchmarking (RFC 2544): it is never a real destination and lies outside every blocked range.
+The daemon refuses a pool that overlaps a blocked range (the firewall would drop it), a `no_proxy` CIDR (that traffic would go out direct, to nowhere) or a `--blocked-exempt` range, and a pool smaller than a /24.
+- Each name keeps one address while its mapping lives (`SyntheticTTL`, 300s, refreshed by every query); the address goes into `allow_<k>` with the same lifetime, so the firewall admits it like any DNS-learned address.
+- Addresses are handed out round-robin, skipping the pool's first and last address and every address still mapped; an exhausted pool answers SERVFAIL.
+- The mapping lives in the DNS proxy's cache, the one that already attributes flows to names, so `dst_domain` in flow logs, the reload repopulation and the reset on quarantine release all work unchanged.
+- Other record types for allowlisted names get an empty answer, as there is nothing real to return. AAAA, HTTPS and SVCB were already empty.
+- Names that match `no_proxy` are still resolved by the site resolver, since they go out direct and are typically internal.
+
+The relay treats a pool address only as a stand-in for its name and never sends it to the proxy.
+An allowlisted SNI or Host is used as always; an IP-literal Host falls back to the address's mapped name; a pool address with no allowlisted name and no live mapping is refused as `synthetic_unmapped` (HTTP gets 403).
+A pool address is never forwarded by address, even if `allow_cidrs` covers it.
+
+A restarted daemon keeps `allow_<k>` but not the mappings, which live only in memory.
+Connections that carry their name (TLS with SNI, HTTP with a name in `Host`) keep working; ones that do not are refused as `synthetic_unmapped` until the client looks the name up again.
+Persisting the mappings would close that gap; nameless connections to a proxied destination are rare enough that it is not done yet.
+
+`test/e2e/synthetic.sh` checks that pool answers never reach the site resolver (whose nameserver records every query), that the proxy only ever sees names, that an IP-literal Host reaches the proxy as the mapped name, that `no_proxy` names resolve for real and go direct, and the behavior after a restart.
+
+### The absolute-form request line comes from `Host`
+Found while building synthetic DNS: for plain HTTP, the relay set the proxy request's URL to the decided target but left `req.Host` as the sandbox sent it.
+Go's `Request.WriteProxy` builds the absolute-form request line from `req.Host`, so the proxy was asked for whatever the `Host` header named.
+An IP-literal `Host` passes the relay's check ("only the address matters"), so a sandbox allowed to reach any address over plain HTTP could have the proxy fetch from any other address, for example `Host: 203.0.113.10`.
+The relay now sets `req.Host` to the decided target as well; a relay unit test and `test/e2e/proxy.sh` check that the proxy is asked for the admitted address, never the one in the header.
+Direct mode (the SNI check without a proxy) was not affected: it forwards the request to the original destination, whatever its `Host`.
 
 ### Configuration
 The proxy is a property of the host network, so it is configured on the daemon, not in sandbox policies:

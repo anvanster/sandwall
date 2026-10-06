@@ -364,9 +364,39 @@ func TestDecide(t *testing.T) {
 		{"198.51.100.1", "", "198.51.100.1", false}, // DNS name no longer allowlisted
 		{"151.101.0.223", "10.0.0.1", "151.101.0.223", false},
 	} {
-		got, denied := r.decide(ip(tc.dst), tc.name)
-		if got != tc.want || denied != tc.denied {
-			t.Errorf("decide(%s, %q) = %q, %v; want %q, %v", tc.dst, tc.name, got, denied, tc.want, tc.denied)
+		got, reason := r.decide(ip(tc.dst), tc.name)
+		if denied := reason != ""; got != tc.want || denied != tc.denied {
+			t.Errorf("decide(%s, %q) = %q, %q; want %q, denied %v", tc.dst, tc.name, got, reason, tc.want, tc.denied)
+		}
+	}
+}
+
+func TestDecideSynthetic(t *testing.T) {
+	pool := netip.MustParsePrefix("198.18.0.0/15")
+	mapped := netip.MustParseAddr("198.18.0.7")
+	r := New(Config{Synthetic: pool, Domain: func(a netip.Addr) string {
+		if a == mapped {
+			return "pypi.org"
+		}
+		return ""
+	}}, Settings{AllowDomains: []string{"pypi.org", "github.com"}, AllowCIDRs: []netip.Prefix{netip.MustParsePrefix("198.18.0.0/16")}})
+	ip := netip.MustParseAddr
+	for _, tc := range []struct {
+		dst, name, want, reason string
+	}{
+		{"198.18.0.7", "pypi.org", "pypi.org", ""},
+		{"198.18.0.7", "github.com", "github.com", ""}, // another allowlisted name: the proxy resolves it
+		{"198.18.0.7", "", "pypi.org", ""},
+		{"198.18.0.7", "198.18.0.7", "pypi.org", ""}, // an IP literal falls back to the mapping
+		{"198.18.0.9", "", "", ReasonSyntheticUnmapped},
+		{"198.18.0.9", "198.18.0.9", "", ReasonSyntheticUnmapped},
+		{"198.18.0.9", "pypi.org", "pypi.org", ""},
+		// Never forwarded by address, even inside allow_cidrs.
+		{"198.18.0.7", "evil.test", "", nameMismatch},
+	} {
+		got, reason := r.decide(ip(tc.dst), tc.name)
+		if got != tc.want || reason != tc.reason {
+			t.Errorf("decide(%s, %q) = %q, %q; want %q, %q", tc.dst, tc.name, got, reason, tc.want, tc.reason)
 		}
 	}
 }

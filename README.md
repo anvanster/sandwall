@@ -145,6 +145,10 @@ The sandbox cannot reach the proxy itself, and proxy credentials never enter it.
 Allowed traffic to them, UDP included, is forwarded as without a proxy; the policy still applies first, so a `no_proxy` entry never allows anything.
 Names work through their DNS answers, so a `no_proxy` name that shares an address with other allowlisted names (a CDN, say) takes them direct too.
 
+If the site resolver answers internal names only, add `--synthetic-dns`.
+Allowlisted names (other than `no_proxy` ones) are then answered from a reserved address pool (`--synthetic-dns-pool`, default `198.18.0.0/15`) without asking the resolver, and the relay asks the proxy for the name behind each pool address, so the proxy does the real resolution.
+Connections to a pool address that carry no allowlisted name and no longer map to one are refused as `synthetic_unmapped`.
+
 ## Policy reference
 
 ```yaml

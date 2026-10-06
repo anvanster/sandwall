@@ -26,10 +26,12 @@ Detection without a working kill switch is half a control: today nothing acts on
 
 - [x] **S2:** per-sandbox policy-violation webhooks.
 - [x] **S3:** OTel log export.
-- [ ] **Synthetic DNS** for proxy-only networks whose resolver answers internal names only (design in DECISIONS.md, "Upstream proxy" / DNS).
+- [x] **Synthetic DNS** (`--synthetic-dns`) for proxy-only networks whose resolver answers internal names only; `make e2e-synthetic`. DECISIONS.md, "Synthetic DNS". Building it found and fixed a proxy-mode bug: an IP-literal `Host` made the proxy fetch from that address.
 - [ ] **SNI check ports:** only 80 and 443 go through the relay in direct mode; consider making the list configurable.
 
 ## Known limitations worth revisiting
+
+- Synthetic DNS mappings live only in memory: after a daemon restart, connections to an earlier pool address that carry no name (no SNI or `Host`) are refused as `synthetic_unmapped` until the client resolves again. Persisting the mappings in the state directory would fix it.
 
 - DNS answers take about 15 ms through the sandbox's proxy (measured by the relay cost benchmark, against the local fake upstream), which dwarfs the relay's cost. Much of it is likely the allow-set insert, one `nft` process per answer; measure the split, and consider inserting over netlink.
 

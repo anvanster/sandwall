@@ -75,6 +75,11 @@ type Options struct {
 	UpstreamProxy *relay.Upstream
 	// NoProxy lists destinations that bypass UpstreamProxy.
 	NoProxy relay.NoProxy
+	// SyntheticDNS, when valid (needs UpstreamProxy), answers allowlisted
+	// names that do not match NoProxy from this pool instead of resolving
+	// them; the upstream proxy resolves them. For networks whose resolver
+	// answers internal names only.
+	SyntheticDNS netip.Prefix
 	// Webhooks are the endpoints policies can send alerts to.
 	Webhooks []alert.Endpoint
 	// OTLP, when set, exports every logged event as an OpenTelemetry log
@@ -626,6 +631,7 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 			Listen:    netip.AddrPortFrom(sb.HostAddr, addressing.RelayPort),
 			Upstream:  mgr.opts.UpstreamProxy,
 			Domain:    proxy.Domain,
+			Synthetic: mgr.syntheticPool(),
 			Sink:      mgr.sink,
 			Count:     mgr.countRelay,
 			Log:       mgr.log,
@@ -728,7 +734,17 @@ func (mgr *Manager) proxySettings(pol *policy.Policy) dnsproxy.Settings {
 	if mgr.opts.UpstreamProxy != nil {
 		s.Direct = mgr.opts.NoProxy.Patterns
 	}
+	s.Synthetic = mgr.syntheticPool()
 	return s
+}
+
+// syntheticPool is the synthetic DNS pool, or the zero prefix when the mode
+// is off; it only applies behind an upstream proxy.
+func (mgr *Manager) syntheticPool() netip.Prefix {
+	if mgr.opts.UpstreamProxy == nil {
+		return netip.Prefix{}
+	}
+	return mgr.opts.SyntheticDNS
 }
 
 func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry, direct bool) error {
