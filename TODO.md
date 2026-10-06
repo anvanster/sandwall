@@ -27,7 +27,7 @@ Detection without a working kill switch is half a control: today nothing acts on
 - [x] **S2:** per-sandbox policy-violation webhooks.
 - [x] **S3:** OTel log export.
 - [x] **Synthetic DNS** (`--synthetic-dns`) for proxy-only networks whose resolver answers internal names only; `make e2e-synthetic`. DECISIONS.md, "Synthetic DNS". Building it found and fixed a proxy-mode bug: an IP-literal `Host` made the proxy fetch from that address.
-- [ ] **SNI check ports:** only 80 and 443 go through the relay in direct mode; consider making the list configurable.
+- [x] **SNI check ports:** `--sni-check-ports` (default `80,443`) sets the TCP ports relayed in direct mode, and QUIC is rejected on the same ports. DECISIONS.md, S1 "Which ports".
 
 ## Known limitations worth revisiting
 

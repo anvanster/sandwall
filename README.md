@@ -104,11 +104,12 @@ sudo bin/sandwall nuke                                  # remove everything sand
 
 ### SNI/Host check
 
-Allowed TCP connections to ports 80 and 443 go through a per-sandbox relay on `10.200.k.1:15001`.
+Allowed TCP connections to ports 80 and 443 (`--sni-check-ports` changes the list) go through a per-sandbox relay on `10.200.k.1:15001`.
 It reads the TLS ClientHello SNI or the HTTP `Host` of every request and, if the name is allowlisted (or the address is inside `allow_cidrs`), connects to the original destination and splices the connection; otherwise it resets the connection (`sni_mismatch`) or answers 403 (`host_mismatch`).
 There is no TLS termination.
-QUIC (UDP 443) to DNS-learned addresses is rejected (`quic_blocked`) because its server name cannot be checked; clients fall back to TCP.
+QUIC (UDP to the same ports) to DNS-learned addresses is rejected (`quic_blocked`) because its server name cannot be checked; clients fall back to TCP.
 Other ports are forwarded unchecked.
+Add a port only if its clients speak first with TLS or HTTP (`--sni-check-ports 80,443,8443`, say); for a server-first protocol the relay waits 1s for a name before it connects.
 Connections through the relay end when the daemon stops, unlike forwarded flows.
 Turn it off with `daemon --sni-check=false`.
 
@@ -209,7 +210,7 @@ Rule order for traffic leaving the host:
 8. Everything else is dropped (`not_allowed`).
 
 Traffic to the host itself is dropped (`host_access`), except DNS to the sandbox's own proxy.
-With the SNI check, step 7 first rejects QUIC to DNS-learned addresses (`quic_blocked`), and accepted TCP to ports 80 and 443 goes on to the relay.
+With the SNI check, step 7 first rejects QUIC to DNS-learned addresses (`quic_blocked`), and accepted TCP to the SNI check ports (80 and 443 by default) goes on to the relay.
 With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (forwarded directly) and otherwise only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
 
 ## Quarantine

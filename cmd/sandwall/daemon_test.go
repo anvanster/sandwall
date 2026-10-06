@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -43,6 +44,33 @@ func TestSyntheticPoolValidation(t *testing.T) {
 	} {
 		_, err := syntheticPool(tc.enabled, tc.poolSet, tc.raw, tc.up, tc.np, tc.exempt)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err %v, want %q", name, err, tc.want)
+		}
+	}
+}
+
+func TestSNICheckPorts(t *testing.T) {
+	got, err := sniCheckPorts(true, true, []int{8443, 443, 80})
+	if err != nil || fmt.Sprint(got) != "[80 443 8443]" {
+		t.Errorf("valid list: %v, %v", got, err)
+	}
+	if got, err := sniCheckPorts(false, false, []int{80, 443}); err != nil || got != nil {
+		t.Errorf("check off: %v, %v", got, err)
+	}
+	for name, tc := range map[string]struct {
+		sniCheck, set bool
+		ports         []int
+		want          string
+	}{
+		"with --sni-check=false": {false, true, []int{443}, "needs the SNI check"},
+		"empty":                  {true, true, nil, "is empty"},
+		"zero":                   {true, true, []int{0}, "not a port"},
+		"too high":               {true, true, []int{70000}, "not a port"},
+		"DNS":                    {true, true, []int{443, 53}, "is DNS"},
+		"DoT":                    {true, true, []int{853}, "is DNS"},
+		"duplicate":              {true, true, []int{443, 80, 443}, "listed twice"},
+	} {
+		if _, err := sniCheckPorts(tc.sniCheck, tc.set, tc.ports); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err %v, want %q", name, err, tc.want)
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 		synthDNS    bool
 		synthPool   string
 		sniCheck    bool
+		sniPorts    []int
 		webhooks    []string
 		secrets     []string
 		otlpURL     string
@@ -95,6 +97,10 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ports, err := sniCheckPorts(sniCheck, cmd.Flags().Changed("sni-check-ports"), sniPorts)
+			if err != nil {
+				return err
+			}
 			synth, err := syntheticPool(synthDNS, cmd.Flags().Changed("synthetic-dns-pool"), synthPool, up, np, prefixes)
 			if err != nil {
 				return err
@@ -107,7 +113,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, synth, sniCheck, eps, otlp)
+			return runDaemon(cmd.Context(), g, metricsAddr, upstream, prefixes, paths, up, np, notes, synth, sniCheck, ports, eps, otlp)
 		},
 	}
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", ":9464", "Prometheus listen address (empty to disable)")
@@ -118,6 +124,7 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().IntVar(&paths.UIDBase, "vm-uid-base", fc.DefaultUIDBase, "VMMs run as uid/gid base+k; base+1..base+254 must be unused on the host")
 	cmd.Flags().StringVar(&proxyURL, "upstream-proxy", "", "carry allowed sandbox TCP through this HTTP proxy, http://[user:pass@]host:port")
 	cmd.Flags().BoolVar(&proxyEnv, "upstream-proxy-from-env", false, "take --upstream-proxy from https_proxy or http_proxy, and --no-proxy from no_proxy")
+	cmd.Flags().IntSliceVar(&sniPorts, "sni-check-ports", nft.DefaultSNIPorts, "ports the SNI check covers: allowed TCP to them goes through the relay, UDP (QUIC) to DNS-learned addresses on them is rejected; list only ports where the client speaks first (TLS, HTTP)")
 	cmd.Flags().BoolVar(&sniCheck, "sni-check", true, "check the TLS SNI or HTTP Host of allowed connections to ports 80 and 443 against the allowlist (--sni-check=false to forward them unchecked)")
 	cmd.Flags().StringArrayVar(&webhooks, "webhook", nil, "name=URL of a webhook that policies can send alerts to (repeatable)")
 	cmd.Flags().StringArrayVar(&secrets, "webhook-secret", nil, "name=file holding the HMAC-SHA256 key that signs that webhook's requests (repeatable)")
@@ -128,6 +135,32 @@ func newDaemonCmd(g *globalFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&synthDNS, "synthetic-dns", false, "behind an upstream proxy whose network resolves internal names only: answer allowlisted names (except no_proxy ones) from --synthetic-dns-pool and let the proxy resolve them")
 	cmd.Flags().StringVar(&synthPool, "synthetic-dns-pool", dnsproxy.DefaultSyntheticPool.String(), "IPv4 range for --synthetic-dns answers; must not be a real destination")
 	return cmd
+}
+
+// sniCheckPorts validates --sni-check-ports and returns the ports sorted.
+func sniCheckPorts(sniCheck, set bool, ports []int) ([]int, error) {
+	if !sniCheck {
+		if set {
+			return nil, errors.New("--sni-check-ports needs the SNI check (drop --sni-check=false)")
+		}
+		return nil, nil
+	}
+	if len(ports) == 0 {
+		return nil, errors.New("--sni-check-ports is empty; use --sni-check=false to turn the check off")
+	}
+	out := slices.Clone(ports)
+	slices.Sort(out)
+	for i, p := range out {
+		switch {
+		case p < 1 || p > 65535:
+			return nil, fmt.Errorf("--sni-check-ports: %d is not a port", p)
+		case p == 53 || p == 853:
+			return nil, fmt.Errorf("--sni-check-ports: %d is DNS, which only the sandbox's DNS proxy may get", p)
+		case i > 0 && out[i-1] == p:
+			return nil, fmt.Errorf("--sni-check-ports: %d listed twice", p)
+		}
+	}
+	return out, nil
 }
 
 // syntheticPool validates --synthetic-dns and its pool. The pool must not
@@ -217,7 +250,7 @@ func envFirst(names ...string) string {
 }
 
 func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string, exempt []netip.Prefix, paths fc.Paths,
-	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, synthetic netip.Prefix, sniCheck bool, webhooks []alert.Endpoint, otlp *otelexport.Config) error {
+	proxy *relay.Upstream, noProxy relay.NoProxy, noProxyNotes []string, synthetic netip.Prefix, sniCheck bool, sniPorts []int, webhooks []alert.Endpoint, otlp *otelexport.Config) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if len(exempt) > 0 {
 		log.Warn("blocked ranges have exemptions; do not use in production", "exempt", exempt)
@@ -228,9 +261,14 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		for _, n := range noProxyNotes {
 			log.Warn("no_proxy entry", "note", n)
 		}
+		if sniCheck && !slices.Equal(sniPorts, nft.DefaultSNIPorts) {
+			log.Warn("--sni-check-ports has no effect behind an upstream proxy: all allowed TCP goes through the relay and other traffic is rejected")
+		}
 		if synthetic.IsValid() {
 			log.Info("synthetic DNS: allowlisted names are answered from a pool and resolved by the proxy", "pool", synthetic)
 		}
+	} else if sniCheck {
+		log.Info("SNI/Host check on", "ports", sniPorts)
 	}
 	m := metrics.New()
 	mgr, err := daemon.New(ctx, daemon.Options{
@@ -242,6 +280,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		NoProxy:         noProxy,
 		SyntheticDNS:    synthetic,
 		SNICheck:        sniCheck,
+		SNIPorts:        sniPorts,
 		Webhooks:        webhooks,
 		OTLP:            otlp,
 		FC:              paths,

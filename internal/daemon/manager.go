@@ -85,10 +85,13 @@ type Options struct {
 	// OTLP, when set, exports every logged event as an OpenTelemetry log
 	// record. Its Proxy and Log are filled in by the manager.
 	OTLP *otelexport.Config
-	// SNICheck sends allowed TCP to ports 80 and 443 through the relay,
-	// which checks the TLS SNI or HTTP Host against the allowlist. With an
-	// upstream proxy the relay sees all TCP anyway.
+	// SNICheck sends allowed TCP to SNIPorts through the relay, which
+	// checks the TLS SNI or HTTP Host against the allowlist, and rejects
+	// QUIC on those ports. With an upstream proxy the relay sees all TCP
+	// anyway.
 	SNICheck bool
+	// SNIPorts are the ports SNICheck covers; empty means nft.DefaultSNIPorts.
+	SNIPorts []int
 	// FC locates firecracker and jailer for VM mode. VM mode is unavailable
 	// when either binary is unset.
 	FC      fc.Paths
@@ -687,6 +690,7 @@ func (mgr *Manager) sandboxRules(k int, pol *policy.Policy, allowed, direct []nf
 	return nft.SandboxConfig{
 		Proxied:         mgr.opts.UpstreamProxy != nil,
 		SNICheck:        mgr.opts.SNICheck,
+		SNIPorts:        mgr.opts.SNIPorts,
 		Direct:          direct,
 		Index:           k,
 		AllowCIDRs:      pol.Egress.AllowCIDRs,

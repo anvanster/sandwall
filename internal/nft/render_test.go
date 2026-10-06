@@ -93,6 +93,17 @@ func TestRenderSandboxSNICheck(t *testing.T) {
 	golden(t, "sandbox-sni.nft", got)
 }
 
+func TestRenderSandboxSNICheckPorts(t *testing.T) {
+	got, err := RenderSandbox(SandboxConfig{
+		Index: 7, AllowCIDRs: []string{"203.0.113.0/24"}, MaxConns: 64, NewConnsPerSec: 20,
+		SNICheck: true, SNIPorts: []int{443, 8443},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "sandbox-sni-ports.nft", got)
+}
+
 func TestRenderSandboxQuarantined(t *testing.T) {
 	got, err := RenderSandbox(SandboxConfig{
 		Index: 7, AllowCIDRs: []string{"203.0.113.0/24"}, MaxConns: 64, NewConnsPerSec: 20, SNICheck: true,

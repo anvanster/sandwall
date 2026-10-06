@@ -66,8 +66,10 @@ const (
 	ReasonQuarantined = "quarantined"
 )
 
-// SNIPorts are the TCP ports the SNI check sends through the relay.
-var SNIPorts = []int{80, 443}
+// DefaultSNIPorts are the ports the SNI check covers unless configured:
+// allowed TCP to them goes through the relay, and UDP (QUIC) to DNS-learned
+// addresses on them is rejected.
+var DefaultSNIPorts = []int{80, 443}
 
 // PreroutingPriority runs sandbox policy after conntrack (-200) and before
 // the proxy redirect (dstnat, -100).
@@ -96,12 +98,20 @@ type BaseConfig struct {
 	// Proxy redirects allowed sandbox TCP to the per-sandbox relay on
 	// addressing.RelayPort instead of forwarding it.
 	Proxy bool
-	// SNICheck redirects allowed sandbox TCP to ports 80 and 443 to the
-	// relay, which checks the TLS SNI or HTTP Host. Implied by Proxy.
+	// SNICheck redirects allowed sandbox TCP to the SNI check ports (see
+	// SandboxConfig.SNIPorts) to the relay, which checks the TLS SNI or HTTP
+	// Host. Implied by Proxy.
 	SNICheck bool
 	// DirectCIDRs are no_proxy destinations: allowed traffic to them is
 	// forwarded as without a proxy.
 	DirectCIDRs []netip.Prefix
+}
+
+func (cfg SandboxConfig) sniPorts() []int {
+	if len(cfg.SNIPorts) == 0 {
+		return DefaultSNIPorts
+	}
+	return cfg.SNIPorts
 }
 
 // SandboxConfig is the per-sandbox part of the ruleset.
@@ -119,10 +129,12 @@ type SandboxConfig struct {
 	// other allowed traffic is rejected because the proxy cannot carry it,
 	// except to no_proxy destinations (direct_<k>, direct_cidrs).
 	Proxied bool
-	// SNICheck matches BaseConfig.SNICheck: allowed TCP to ports 80 and
-	// 443 goes to the relay, and QUIC to DNS-learned addresses is rejected.
-	// Proxied sandboxes get the check for all TCP anyway.
+	// SNICheck matches BaseConfig.SNICheck: allowed TCP to SNIPorts goes to
+	// the relay, and QUIC (UDP to those ports) to DNS-learned addresses is
+	// rejected. Proxied sandboxes get the check for all TCP anyway.
 	SNICheck bool
+	// SNIPorts are the ports SNICheck covers; empty means DefaultSNIPorts.
+	SNIPorts []int
 	// Direct repopulates direct_<k> after the flush on (re)apply, like
 	// Allowed; PreserveAllowed keeps it as is unless ResetDirect is set.
 	Direct      []AllowEntry
@@ -361,8 +373,8 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 		if cfg.SNICheck {
 			// QUIC carries its server name encrypted, so the relay cannot
 			// check it. allow_cidrs do not depend on the name.
-			b.line("%s ip daddr @allow_%d ip daddr != @allow_cidr_%d udp dport 443 counter log group %d prefix %q jump conn_reject",
-				chain, k, k, LogGroup, LogPrefix(k, ReasonQUICBlocked))
+			b.line("%s ip daddr @allow_%d ip daddr != @allow_cidr_%d udp dport { %s } counter log group %d prefix %q jump conn_reject",
+				chain, k, k, joinInts(cfg.sniPorts()), LogGroup, LogPrefix(k, ReasonQUICBlocked))
 		}
 		b.line("%s ip daddr @allow_%d accept", chain, k)
 		b.line("%s ip daddr @allow_cidr_%d accept", chain, k)
@@ -389,7 +401,7 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 		b.line("%s ip daddr @direct_cidrs return", nat)
 		b.line("%s meta l4proto tcp fib daddr type != local redirect to :%d", nat, addressing.RelayPort)
 	case cfg.SNICheck:
-		b.line("%s tcp dport { %s } fib daddr type != local redirect to :%d", nat, joinInts(SNIPorts), addressing.RelayPort)
+		b.line("%s tcp dport { %s } fib daddr type != local redirect to :%d", nat, joinInts(cfg.sniPorts()), addressing.RelayPort)
 	}
 
 	b.line("add element inet %s pre_vmap { %q : jump sb_%d }", t, sb.HostVeth, k)

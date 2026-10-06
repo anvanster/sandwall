@@ -17,6 +17,9 @@ setup_attacker || exit 1
 ip netns exec "$ATTACKER_NS" python3 "$E2E_DIR/attacker.py" --bind "$A" --port 80 --hold-port 443 \
 	--loot "$T/loot-80.txt" >"$T/attacker-80.log" 2>&1 &
 for _ in $(seq 50); do curl -s -m 1 "http://$A/" >/dev/null && break; sleep 0.1; done
+# A TCP hold server on 8443, for --sni-check-ports.
+ip netns exec "$ATTACKER_NS" python3 "$E2E_DIR/attacker.py" --bind "$A" --port 8081 --hold-port 8443 \
+	--loot "$T/loot-8443.txt" >"$T/attacker-8443.log" 2>&1 &
 start_daemon || exit 1
 expect_ok "create sandbox t1" sandwall sandbox create t1 --policy "$P/proxy.yaml"
 count_events() { jq -c "select($2)" "$LOGS/$1.jsonl" | wc -l; }
@@ -54,6 +57,28 @@ wait_log t1 "direct relay access is host_access" '.type=="deny" and .dst_port==1
 expect_fail "non-allowlisted address on port 443 still dropped" sbx t1 curl -sk -m 3 https://203.0.113.10/
 wait_log t1 "not_allowed logged" '.type=="deny" and .dst_ip=="203.0.113.10" and .reason=="not_allowed"'
 expect_ok "relay connections counted" bash -c "curl -s http://127.0.0.1:19464/metrics | grep -q 'sandwall_relay_connections_total{result=\"ok\",sandbox=\"t1\"}'"
+
+log "--sni-check-ports"
+relayed=$(count_events t1 '.type=="relay"')
+sbx t1 curl -sk -m 3 "https://a.attacker.test:8443/" >/dev/null 2>&1
+expect_eq "by default, 8443 does not go through the relay" "$(count_events t1 '.type=="relay"')" "$relayed"
+stop_daemon
+start_daemon --sni-check-ports 443,8443 || exit 1
+expect_ok "redirect follows the configured ports" bash -c "nft list chain inet sandwall sbnat_1 | grep -q 'tcp dport { 443, 8443 }'"
+sbx t1 curl -sk -m 3 "https://a.attacker.test:8443/" >/dev/null 2>&1
+wait_log t1 "TLS on 8443 checked and relayed" \
+	".type==\"relay\" and .verdict==\"allow\" and .sni==\"a.attacker.test\" and .target==\"$A:8443\""
+expect_fail "non-allowlisted SNI on 8443 fails" sbx t1 curl -sk -m 5 --resolve "evil.test:8443:$A" https://evil.test:8443/
+wait_log t1 "sni_mismatch on 8443" '.type=="relay" and .reason=="sni_mismatch" and .sni=="evil.test" and .dst_port==8443'
+sbx t1 bash -c "echo x >/dev/udp/$A/8443"
+wait_log t1 "QUIC on 8443 rejected" '.type=="deny" and .proto=="udp" and .dst_port==8443 and .reason=="quic_blocked"'
+relayed=$(count_events t1 '.type=="relay"')
+expect_eq "port 80 is no longer checked" \
+	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' -H 'Host: evil.test' http://a.attacker.test/)" 200
+expect_eq "and does not go through the relay" "$(count_events t1 '.type=="relay"')" "$relayed"
+stop_daemon
+start_daemon || exit 1
+expect_ok "a restart without the flag restores 80 and 443" bash -c "nft list chain inet sandwall sbnat_1 | grep -q 'tcp dport { 80, 443 }'"
 
 log "--sni-check=false"
 stop_daemon

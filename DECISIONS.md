@@ -344,7 +344,7 @@ The relay built for the upstream proxy already does the peeking (TLS ClientHello
 Without a proxy, the relay connects to the original destination itself instead of sending a CONNECT, and splices the connection.
 It uses REDIRECT rather than TPROXY, for the reasons given under "REDIRECT, not TPROXY" above.
 
-`sbnat_<k>` redirects allowed TCP to ports 80 and 443 to the relay; `relay_redirect` (renamed from `proxy_redirect`, which the base ruleset deletes) dispatches to it whenever the relay is on.
+`sbnat_<k>` redirects allowed TCP to the SNI check ports (80 and 443 by default) to the relay; `relay_redirect` (renamed from `proxy_redirect`, which the base ruleset deletes) dispatches to it whenever the relay is on.
 The `proxy` log event and `sandwall_proxy_connects_total` became `relay` and `sandwall_relay_connections_total`, since they now describe both modes.
 
 ### On by default
@@ -359,12 +359,20 @@ The relay's outbound connection comes from the host, not from `10.200.k.2`; flow
 
 ### QUIC
 QUIC carries its server name in an encrypted Initial packet, so the relay cannot check it.
-With the SNI check on, UDP 443 to a DNS-learned address (not one inside `allow_cidrs`) is rejected with `icmpx admin-prohibited` and logged as `quic_blocked`; HTTP/3 clients fall back to TCP.
+With the SNI check on, UDP to an SNI check port (443 among them) on a DNS-learned address (not one inside `allow_cidrs`) is rejected with `icmpx admin-prohibited` and logged as `quic_blocked`; HTTP/3 clients fall back to TCP.
 Measured with curl 8.22 `--http3` against pypi.org: the reject reaches curl as `EHOSTUNREACH` and it falls back to HTTP/2 at once, adding about 0.01s.
 When the kernel's per-destination ICMP rate limit swallows the reject, curl's 200ms happy-eyeballs timer starts TCP instead, adding about 0.2s.
 
+### Which ports
+`--sni-check-ports` (default `80,443`) sets the ports the check covers: allowed TCP to them is redirected to the relay, and UDP to them on a DNS-learned address is rejected as `quic_blocked`, since HTTP/3 can be advertised on other ports too.
+That also rejects UDP 80 by default, which no legitimate client uses; one rule for all checked ports is simpler to reason about than a QUIC-only exception for 443.
+The relay recognizes TLS and HTTP by content, not by port, so it needs no change; a port whose protocol is server-first (SMTP, SSH) still works but waits 1s for a name, so such ports should not be listed.
+The list is a daemon setting, like `--sni-check`, and applies to every sandbox; a restarted daemon re-renders each sandbox with the current list.
+Behind an upstream proxy it has no effect (all allowed TCP goes through the relay, other traffic is rejected), and the daemon says so at startup.
+`test/e2e/s1.sh` checks that 8443 is not relayed by default, then with `--sni-check-ports 443,8443` that TLS on 8443 is checked, QUIC on 8443 rejected and port 80 no longer checked, and that a restart without the flag restores 80 and 443.
+
 ### What it does not cover
-Ports other than 80 and 443 are forwarded unchecked; behind an upstream proxy every port goes through the relay.
+Ports outside `--sni-check-ports` are forwarded unchecked; behind an upstream proxy every port goes through the relay.
 `no_proxy` destinations bypass the relay.
 The HTTP `Host` inside TLS is not visible without TLS interception, so domain fronting through an allowlisted SNI remains possible.
 

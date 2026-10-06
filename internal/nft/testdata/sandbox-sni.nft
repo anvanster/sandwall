@@ -33,7 +33,7 @@ add rule inet sandwall sb_7 ip daddr 10.200.0.0/16 counter log group 1 prefix "s
 add rule inet sandwall sb_7 ip daddr @blocked_ranges ip daddr != @blocked_exempt counter log group 1 prefix "sandwall:7:blocked_range " drop
 add rule inet sandwall sb_7 ct state new limit rate over 20/second burst 20 packets counter log group 1 prefix "sandwall:7:rate_limit " drop
 add rule inet sandwall sb_7 ct state new ct count over 64 counter log group 1 prefix "sandwall:7:conn_limit " jump conn_reject
-add rule inet sandwall sb_7 ip daddr @allow_7 ip daddr != @allow_cidr_7 udp dport 443 counter log group 1 prefix "sandwall:7:quic_blocked " jump conn_reject
+add rule inet sandwall sb_7 ip daddr @allow_7 ip daddr != @allow_cidr_7 udp dport { 80, 443 } counter log group 1 prefix "sandwall:7:quic_blocked " jump conn_reject
 add rule inet sandwall sb_7 ip daddr @allow_7 accept
 add rule inet sandwall sb_7 ip daddr @allow_cidr_7 accept
 add rule inet sandwall sb_7 counter log group 1 prefix "sandwall:7:not_allowed " drop
