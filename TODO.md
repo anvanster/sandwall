@@ -9,11 +9,7 @@ Run these on a host with direct egress, without `REAL_PROXY`.
 
 - [x] **M1 in direct mode** (`make e2e-m1`): real-site fetches through the direct-mode relay, including the in-flight download across a reload. Green on a direct-egress host, 2026-10-01.
 - [x] **M3 in direct mode** (`make e2e-m3 CLONE_STAGGER=0 FETCH_CONCURRENCY=20`): guest fetches through the direct-mode relay. Green on a direct-egress host, 2026-10-01.
-- [ ] **S1 against real CDNs:**
-  - an allowlisted name on a shared CDN works: TLS 1.3, HTTP/2, large downloads;
-  - `curl --resolve <unlisted name>:443:<address of an allowlisted name>` is refused as `sni_mismatch`;
-  - `curl --http3` to an allowlisted name falls back to TCP after `quic_blocked`;
-  - `pip install` (many connections to pypi.org and files.pythonhosted.org) succeeds.
+- [x] **S1 against real CDNs** (`make e2e-s1-real HTTP3_CURL=<curl with HTTP/3>`): TLS 1.3, HTTP/2 and a 55 MiB sha256-verified download via Fastly-hosted pypi.org/files.pythonhosted.org; fronting www.python.org through pypi.org's address refused as `sni_mismatch` (and `host_mismatch` over HTTP); `curl --http3` falls back to HTTP/2 in under 0.1s after `quic_blocked`; `pip install requests rich numpy` succeeds. Green on a direct-egress host, 2026-10-05.
 - [ ] **Relay cost:** throughput and latency of a large HTTPS download through the relay compared with `--sni-check=false`, with and without a `max_ingress_bw` cap (the M2 bandwidth checks use port 5201, which the relay does not see).
 - [x] **Demos:** `demo/exfil.sh` gained act (c), escalation caught by the SNI check and a DNS-bypass drop, auto-quarantine and a signed webhook; `demo/clones.sh` quarantines one clone mid-run. README output refreshed (run behind an HTTP proxy, 2026-10-02).
 - [ ] **Demos in direct mode:** run `demo/exfil.sh` and `demo/clones.sh` once without `REAL_PROXY`; act (c)'s fronting attempt then goes through the direct-mode relay.

@@ -25,6 +25,7 @@ G=(--socket "$SOCK" --state-dir "$STATE" --log-dir "$LOGS" --chroot-base "$CHROO
 DAEMON_PID=""
 PASS=0
 FAIL=0
+SKIP=0
 
 # Attacker endpoint: its own netns behind a routed veth, so sandbox traffic
 # to it takes the host FORWARD path like any internet destination would.
@@ -43,6 +44,8 @@ GATEWAY_IP="$(ip -4 route show default | awk '{print $3; exit}')"
 log()  { printf '\n== %s\n' "$*"; }
 pass() { printf '  ok    %s\n' "$*"; PASS=$((PASS + 1)); }
 fail() { printf '  FAIL  %s\n' "$*"; FAIL=$((FAIL + 1)); }
+# skip: a check that could not run here; reported, never counted as passed.
+skip() { printf '  SKIP  %s\n' "$*"; SKIP=$((SKIP + 1)); }
 
 sandwall() { "$SANDWALL" "${G[@]}" "$@"; }
 sbx() { local id=$1; shift; sandwall sandbox exec "$id" -- "$@"; }
@@ -254,7 +257,9 @@ finish() {
 	"$SANDWALL" "${G[@]}" nuke >/dev/null 2>&1
 	teardown_attacker
 	rm -rf "$SBX_DIR"
-	printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+	printf '\n%d passed, %d failed' "$PASS" "$FAIL"
+	((SKIP > 0)) && printf ', %d skipped' "$SKIP"
+	printf '\n'
 	if ((FAIL > 0)); then
 		echo "artifacts kept in $T"
 		exit 1

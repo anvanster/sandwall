@@ -323,6 +323,8 @@ The relay's outbound connection comes from the host, not from `10.200.k.2`; flow
 ### QUIC
 QUIC carries its server name in an encrypted Initial packet, so the relay cannot check it.
 With the SNI check on, UDP 443 to a DNS-learned address (not one inside `allow_cidrs`) is rejected with `icmpx admin-prohibited` and logged as `quic_blocked`; HTTP/3 clients fall back to TCP.
+Measured with curl 8.22 `--http3` against pypi.org: the reject reaches curl as `EHOSTUNREACH` and it falls back to HTTP/2 at once, adding about 0.01s.
+When the kernel's per-destination ICMP rate limit swallows the reject, curl's 200ms happy-eyeballs timer starts TCP instead, adding about 0.2s.
 
 ### What it does not cover
 Ports other than 80 and 443 are forwarded unchecked; behind an upstream proxy every port goes through the relay.
@@ -332,6 +334,14 @@ The HTTP `Host` inside TLS is not visible without TLS interception, so domain fr
 ### Testing
 `test/e2e/s1.sh` runs an HTTP endpoint on port 80 and a TCP hold server on 443 in the attacker netns.
 It checks allowed and refused Host and SNI, that flows are still logged on the sandbox leg, that QUIC to a DNS-learned address is rejected while other UDP is not, that other TCP ports are neither checked nor relayed, that the relay port is not reachable directly, and that `--sni-check=false` removes the redirect.
+
+`test/e2e/s1-real.sh` (`make e2e-s1-real`, needs direct internet, so not part of `make e2e`) checks the same against real sites on a shared CDN.
+pypi.org and files.pythonhosted.org are allowlisted; both are served from Fastly, whose addresses also serve www.python.org.
+It checks TLS 1.3 and HTTP/2 through the relay, and a 55 MiB wheel download verified against PyPI's sha256 (about 4.8s).
+It checks that `curl --resolve www.python.org:443:<pypi.org's address>` works outside the sandbox but is refused inside as `sni_mismatch`, and that a fronted plain-HTTP `Host` gets 403 as `host_mismatch`.
+It checks that `curl --http3` falls back to HTTP/2 after a `quic_blocked` reject, and that `pip install requests rich numpy` succeeds into a venv in the sandbox.
+The QUIC checks need a curl with HTTP/3 (`HTTP3_CURL=/path`; distro builds usually lack it) and are reported as skipped otherwise.
+pip reuses its connections, so the install went through only two relayed TLS connections, one per name; there were no relay refusals.
 
 ## Quarantine
 

@@ -1,0 +1,11 @@
+# S1 against real sites: what pip needs, nothing else. Both names are served
+# from Fastly, so their addresses are shared with sites that are not allowed.
+egress:
+  default: deny
+  allow_domains:
+    - pypi.org
+    - files.pythonhosted.org
+limits:
+  max_conns: 64
+  new_conns_per_sec: 20
+  dns_qps: 50
