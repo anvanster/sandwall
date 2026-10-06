@@ -414,7 +414,11 @@ func (r *Relay) serveHTTP(c *net.TCPConn, br *bufio.Reader, dst netip.AddrPort, 
 		if direct {
 			err = req.Write(up)
 		} else {
-			req.URL.Scheme, req.URL.Host = "http", ev.Target
+			// WriteProxy builds the absolute-form request line from req.Host,
+			// so it must be the decided target too: otherwise an IP-literal
+			// Host (accepted as "the address") would send the proxy to any
+			// address.
+			req.URL.Scheme, req.URL.Host, req.Host = "http", ev.Target, ev.Target
 			if a := r.cfg.Upstream.auth; a != "" {
 				req.Header.Set("Proxy-Authorization", a)
 			}

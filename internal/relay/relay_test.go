@@ -283,6 +283,24 @@ func TestHTTPPerRequestHostCheck(t *testing.T) {
 	}
 }
 
+// An IP-literal Host is let through because "only the address matters";
+// the proxy must then be asked for that address, the one the firewall
+// admitted, never for whatever address the Host header names.
+func TestHTTPIPLiteralHostCannotRedirect(t *testing.T) {
+	dst := netip.MustParseAddrPort("151.101.0.223:80")
+	h := newHarness(t, 200, dst, Settings{AllowDomains: []string{"pypi.org"}, MaxConns: 4}, "")
+	c := h.dial(t)
+	io.WriteString(c, "GET /loot HTTP/1.1\r\nHost: 1.2.3.4\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "http://151.101.0.223/loot" {
+		t.Errorf("proxy was asked for %q, want the admitted address http://151.101.0.223/loot", body)
+	}
+}
+
 func TestServerFirstUsesDNSName(t *testing.T) {
 	dst := netip.MustParseAddrPort("151.101.0.223:25")
 	h := newHarness(t, 200, dst, Settings{AllowDomains: []string{"mail.example.org"}, MaxConns: 4}, "mail.example.org")

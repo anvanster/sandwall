@@ -35,6 +35,11 @@ wait_log t1 "flow attributed on the sandbox leg" \
 expect_eq "Host not allowlisted gets 403 from the relay" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' -H 'Host: evil.test' "http://a.attacker.test:$ATTACKER_PORT/")" 403
 wait_log t1 "host_mismatch logged" '.type=="relay" and .reason=="host_mismatch" and .http_host=="evil.test"'
+# An IP-literal Host passes as "the address"; the proxy must get the address
+# the firewall admitted, not the one in the header.
+sbx t1 curl -sS -m 10 -o /dev/null -H 'Host: 203.0.113.10' "http://a.attacker.test:$ATTACKER_PORT/" >/dev/null 2>&1
+expect_ok "IP-literal Host: proxy asked for the admitted address" grep -q "^GET http://$A:$ATTACKER_PORT/ HTTP/1.1" "$PLOG"
+expect_fail "and never for the address in the Host header" grep -q 203.0.113.10 "$PLOG"
 expect_eq "sandbox cannot use the proxy as a proxy" \
 	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' -x "http://$A:$PROXY_PORT" http://evil.test/)" 403
 
