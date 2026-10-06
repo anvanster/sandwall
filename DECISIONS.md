@@ -180,6 +180,16 @@ So the M3 test keeps all 20 clones running simultaneously, but runs their allowl
 It checks, from the host's conntrack timestamps, that the fetches within each wave overlapped.
 On bare metal, set `FETCH_CONCURRENCY=20` to fetch from all clones at once.
 
+On 2026-10-05 the same Lima VM was less forgiving: with 20 clones, 1s and even 3s spacing left early clones (usually `c-1`) unreachable while the later ones were restored, although `c-1` stayed healthy through 8 single-clone restores and the base VM was idle when snapshotted.
+`demo/clones.sh` passed there with 10 clones.
+20 clones remain verified only on bare metal, as above.
+
+### Long CLI requests
+The CLI used one HTTP client timeout of 60s for every request.
+`vm clone --count 20 --stagger 3s` takes about 70s, so the CLI gave up, and because the daemon cancels a request whose client disconnects, the clone stopped part way (17 of 20).
+Requests now get the 60s default only when the caller sets no deadline; `vm clone` allows the count times (stagger plus 2 minutes) plus 60s, `vm snapshot` 15 minutes, and a VM-mode `sandbox create` 5 minutes.
+Ctrl-C still cancels them.
+
 ## Upstream proxy
 
 Many networks allow no direct egress: only an HTTP proxy reaches the internet, while the site resolver still resolves external names.

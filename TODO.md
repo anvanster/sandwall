@@ -12,7 +12,7 @@ Run these on a host with direct egress, without `REAL_PROXY`.
 - [x] **S1 against real CDNs** (`make e2e-s1-real HTTP3_CURL=<curl with HTTP/3>`): TLS 1.3, HTTP/2 and a 55 MiB sha256-verified download via Fastly-hosted pypi.org/files.pythonhosted.org; fronting www.python.org through pypi.org's address refused as `sni_mismatch` (and `host_mismatch` over HTTP); `curl --http3` falls back to HTTP/2 in under 0.1s after `quic_blocked`; `pip install requests rich numpy` succeeds. Green on a direct-egress host, 2026-10-05.
 - [x] **Relay cost** (`make e2e-relay-cost`): +0.3 to 0.5 ms per TLS handshake, 83 to 86% of uncapped throughput (8.2 to 8.5 vs 9.9 Gbit/s), no measurable cost under a 200 Mbit cap or on a real download. Numbers in DECISIONS.md, "Relay cost". 2026-10-05.
 - [x] **Demos:** `demo/exfil.sh` gained act (c), escalation caught by the SNI check and a DNS-bypass drop, auto-quarantine and a signed webhook; `demo/clones.sh` quarantines one clone mid-run. README output refreshed (run behind an HTTP proxy, 2026-10-02).
-- [ ] **Demos in direct mode:** run `demo/exfil.sh` and `demo/clones.sh` once without `REAL_PROXY`; act (c)'s fronting attempt then goes through the direct-mode relay.
+- [x] **Demos in direct mode** (2026-10-05, Lima VM): `demo/exfil.sh` passes; act (c)'s fronting attempt is refused by the direct-mode relay as `sni_mismatch` on pypi.org's Fastly address and the sandbox is auto-quarantined. `demo/clones.sh` passes with `CLONES=10 CLONE_STAGGER=3s`; with 20 clones an early clone stalls on this nested-virtualization host (DECISIONS.md), so 20 still needs bare metal. The run also found and fixed the CLI's fixed 60s request timeout, which aborted `vm clone` part way.
 
 ## Incident response (ahead of S2/S3)
 

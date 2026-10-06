@@ -146,6 +146,7 @@ note "sandwall sandbox list:"
 note "webhook soc received (signature checked):"
 jq -r '"    \(if .ok then "signature ok " else "BAD SIGNATURE" end)  " +
 	([.body.events[] | "\(.type)/\(if .type == "quarantine" then .verdict else .reason // .verdict end)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", "))' "$HOOKS"
+note "the same allowlisted fetch, now from the quarantined sandbox:"
 code=$("$SANDWALL" "${G[@]}" sandbox exec agent -- curl -sS -m 5 -o /dev/null -w '%{http_code}' https://pypi.org/simple/requests/ 2>/dev/null)
 printf '    curl https://pypi.org/simple/requests/ -> %s\n' "$code"
 if [[ "$code" == 200 ]]; then

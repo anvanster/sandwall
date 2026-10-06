@@ -47,6 +47,7 @@ sandwall logs agent --deny-only (new lines):
 webhook soc received (signature checked):
     signature ok   deny/dns_bypass x1
     signature ok   quarantine/quarantined x1, relay/sni_mismatch x1
+the same allowlisted fetch, now from the quarantined sandbox:
     curl https://pypi.org/simple/requests/ -> 000
 => quarantined: cut off, kept for forensics (sandwall sandbox release agent)
 ```
