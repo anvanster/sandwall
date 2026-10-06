@@ -343,6 +343,24 @@ It checks that `curl --http3` falls back to HTTP/2 after a `quic_blocked` reject
 The QUIC checks need a curl with HTTP/3 (`HTTP3_CURL=/path`; distro builds usually lack it) and are reported as skipped otherwise.
 pip reuses its connections, so the install went through only two relayed TLS connections, one per name; there were no relay refusals.
 
+### Relay cost
+`test/e2e/relay-cost.sh` (`make e2e-relay-cost`, a benchmark, not part of `make e2e`) compares the SNI check with `--sni-check=false`.
+It downloads from a local HTTPS server (`openssl s_server` behind `bench.attacker.test`) so internet variance does not hide the relay, and from files.pythonhosted.org for comparison.
+Medians on the 10-CPU Lima VM (nested virtualization), two runs:
+
+| | TLS handshake | First byte | Local 512 MiB | Real 55 MiB |
+|---|---|---|---|---|
+| relay | 2.5 ms | 2.7 ms | 8.2 to 8.5 Gbit/s | 96 Mbit/s |
+| `--sni-check=false` | 2.1 ms | 2.2 ms | 9.9 Gbit/s | 91 to 96 Mbit/s |
+| relay, 200 Mbit cap | 2.6 ms | 2.8 ms | 191 Mbit/s | |
+| `--sni-check=false`, 200 Mbit cap | 2.1 ms | 2.2 ms | 191 Mbit/s | |
+
+The relay adds 0.3 to 0.5 ms to a TLS handshake and keeps 83 to 86% of uncapped loopback-speed throughput.
+Once a `max_ingress_bw` cap or the internet path is the bottleneck, it costs nothing measurable.
+Handshake and first-byte times are counted from the end of DNS.
+A DNS lookup through the sandbox's proxy took about 15 ms in both modes, far more than the relay adds; see TODO.md.
+The test asserts the relay sustains over 1 Gbit/s uncapped, adds under 5 ms to the handshake, and that both modes reach 85 to 105% of the cap.
+
 ## Quarantine
 
 ### Why

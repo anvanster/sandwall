@@ -1,0 +1,13 @@
+# Relay cost benchmark: the local HTTPS server's zone, resolved by the test
+# endpoint's nameserver. @CAP@ is replaced with a max_ingress_bw line (or
+# nothing) by relay-cost.sh.
+egress:
+  default: deny
+  allow_domains:
+    - bench.attacker.test
+upstream_dns: 10.99.0.1:5353
+limits:
+@CAP@
+  max_conns: 64
+  new_conns_per_sec: 50
+  dns_qps: 100
