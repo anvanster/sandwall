@@ -445,6 +445,10 @@ func RenderRemoveSandbox(k int) (string, error) {
 	return b.String(), nil
 }
 
+// RenderAllow is the text form of InsertAllow, which the daemon uses (over
+// netlink, on the DNS answer path); it is kept as the readable reference and
+// tests check both give the same result.
+//
 // RenderAllow inserts or refreshes DNS-learned addresses in allow_<k>, and
 // with direct also in direct_<k>. Re-adding an existing element does not
 // extend its timeout, so each address is added (ensuring it exists),
@@ -506,11 +510,17 @@ func sortedUnique(entries []AllowEntry) []AllowEntry {
 	return out
 }
 
+// elemTimeoutSeconds is a set element's timeout as nft and InsertAllow
+// apply it: whole seconds, at least one.
+func elemTimeoutSeconds(d time.Duration) int {
+	return int(max(d, time.Second) / time.Second)
+}
+
 func joinAllow(entries []AllowEntry) string {
 	u := sortedUnique(entries)
 	s := make([]string, len(u))
 	for i, e := range u {
-		s[i] = fmt.Sprintf("%s timeout %ds", e.Addr, int(max(e.Timeout, time.Second)/time.Second))
+		s[i] = fmt.Sprintf("%s timeout %ds", e.Addr, elemTimeoutSeconds(e.Timeout))
 	}
 	return strings.Join(s, ", ")
 }

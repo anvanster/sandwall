@@ -42,6 +42,21 @@ The e2e harness instead puts the listener in its own netns `egattacker`, reached
 - If inserting into the allow set fails, the client gets SERVFAIL rather than an answer it cannot use.
 - Over-limit queries get REFUSED. Their log lines are themselves rate-limited, but metrics count every query.
 
+### Allow-set inserts over netlink
+The DNS proxy inserts each allowed answer into `allow_<k>` (and `direct_<k>`) before it answers, so the insert is on every allowed lookup's path.
+It used to apply a rendered `nft -f` script, and an allowed answer took 12 to 15 ms on the Lima VM, against about 0 ms for refused names and the upstream itself.
+Two costs, measured separately:
+- Starting the `nft` process: about 13 ms in the nested VM (2 to 3 ms is typical on bare metal).
+- The refresh in that script (add, delete, add, because re-adding an element does not extend its timeout): a commit that deletes elements waits for an RCU grace period, about 7 ms here, against 0.04 ms for a plain add.
+
+`nft.InsertAllow` now talks nf_tables netlink directly, on `mdlayher/netlink`, which was already a dependency through go-nflog and conntrack.
+It looks each address up first (`GETSETELEM`) and adds only absent ones; an address with at least its new timeout left is left alone, and only one with less is refreshed by add, delete and add.
+Elements are written with 10s on top of their timeout, since the resolver's TTL and the set's timeout count down together: without the margin, every re-query within the TTL would find slightly too little time left and refresh.
+Unlike the text path, an insert never shortens an element; removals already go through a policy reload, which flushes and refills the sets.
+Allowed answers now take 1 to 2 ms on the same VM.
+Only this hot path uses netlink; rulesets are still rendered as text and applied with `nft -f`, and `RenderAllow` remains as the readable equivalent.
+`TestInsertAllowNetlink` (root only, in a throwaway netns) checks absent, refreshed and kept elements against `nft list set`, and `BenchmarkInsertAllow` measures the paths.
+
 ### Deny log de-duplication
 Identical deny events (same sandbox, reason, protocol, destination and port) are logged at most once per second, so retransmits or a flood of dropped packets cannot flood the log.
 `sandwall_denied_total` still counts every packet.
@@ -403,7 +418,7 @@ Medians on the 10-CPU Lima VM (nested virtualization), two runs:
 The relay adds 0.3 to 0.5 ms to a TLS handshake and keeps 83 to 86% of uncapped loopback-speed throughput.
 Once a `max_ingress_bw` cap or the internet path is the bottleneck, it costs nothing measurable.
 Handshake and first-byte times are counted from the end of DNS.
-A DNS lookup through the sandbox's proxy took about 15 ms in both modes, far more than the relay adds; see TODO.md.
+A DNS lookup through the sandbox's proxy took about 15 ms in both modes, far more than the relay adds; it now takes 1 to 2 ms (see "Allow-set inserts over netlink").
 The test asserts the relay sustains over 1 Gbit/s uncapped, adds under 5 ms to the handshake, and that both modes reach 85 to 105% of the cap.
 
 ## Quarantine

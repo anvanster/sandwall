@@ -751,8 +751,11 @@ func (mgr *Manager) syntheticPool() netip.Prefix {
 	return mgr.opts.SyntheticDNS
 }
 
+// insertAllowed adds DNS answers to the allow (and direct) sets over
+// netlink: it runs on every allowed DNS answer, where an `nft` process cost
+// milliseconds per answer.
 func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry, direct bool) error {
-	return nft.Apply(ctx, nft.RenderAllow(k, entries, direct))
+	return nft.InsertAllow(ctx, k, entries, direct)
 }
 
 // ApplyPolicy hot-reloads a sandbox's policy: the chain is re-rendered and
