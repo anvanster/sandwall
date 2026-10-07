@@ -79,9 +79,29 @@ c=$(sbx t1 dig +short c.attacker.test)
 if [[ "$c" =~ $POOL_RE ]]; then pass "c.attacker.test -> $c"; else fail "c.attacker.test -> '$c'"; fi
 
 log "after a daemon restart"
-# The restarted daemon keeps the allow set but has no name for addresses
-# handed out before; a request carrying the name still works.
+# The DNS cache, pool mappings included, is kept in the state directory, so
+# a restarted daemon still knows what its pool addresses stand for.
 stop_daemon
+DNS_STATE="$STATE/dns/t1.json"
+expect_eq "DNS state saved, readable by root only" "$(stat -c %a "$DNS_STATE" 2>/dev/null)" 600
+expect_ok "and holds the mapping" jq -e --arg a "$addr" '.entries[] | select(.name=="a.attacker.test" and .addr==$a)' "$DNS_STATE"
+start_daemon "${FLAGS[@]}" || exit 1
+before=$(proxy_lines "^GET http://a.attacker.test:$ATTACKER_PORT/ ")
+flows_before=$(jq -c "select(.type==\"flow\" and .dst_ip==\"$addr\" and .dst_domain==\"a.attacker.test\")" "$LOGS/t1.jsonl" | wc -l)
+expect_eq "a request by address alone still works" \
+	"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://$addr:$ATTACKER_PORT/")" 200
+expect_eq "and reaches the proxy as a.attacker.test" "$(proxy_lines "^GET http://a.attacker.test:$ATTACKER_PORT/ ")" $((before + 1))
+expect_eq "the name keeps its address" "$(sbx t1 dig +short a.attacker.test)" "$addr"
+for _ in $(seq 50); do
+	(($(jq -c "select(.type==\"flow\" and .dst_ip==\"$addr\" and .dst_domain==\"a.attacker.test\")" "$LOGS/t1.jsonl" | wc -l) > flows_before)) && break
+	sleep 0.1
+done
+expect_ok "the new flow is still attributed to the name" \
+	test "$(jq -c "select(.type==\"flow\" and .dst_ip==\"$addr\" and .dst_domain==\"a.attacker.test\")" "$LOGS/t1.jsonl" | wc -l)" -gt "$flows_before"
+
+log "after a restart that lost the DNS state"
+stop_daemon
+rm -f "$DNS_STATE"
 start_daemon "${FLAGS[@]}" || exit 1
 sbx t1 curl -sk -m 3 --resolve "a.attacker.test:$ATTACKER_HOLD_PORT:$addr" "https://a.attacker.test:$ATTACKER_HOLD_PORT/" >/dev/null 2>&1
 wait_log t1 "TLS with the name still reaches the proxy by name" \
@@ -96,4 +116,5 @@ log "destroy and nuke"
 expect_ok "destroy t1" sandwall sandbox destroy t1
 expect_ok "nuke" sandwall nuke
 stop_daemon
+expect_fail "nuke removed the DNS state" test -e "$STATE/dns"
 assert_no_remnants

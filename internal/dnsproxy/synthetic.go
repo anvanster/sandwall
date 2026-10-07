@@ -61,8 +61,8 @@ func (p *Proxy) synthAddr(qname string, pool netip.Prefix) (netip.Addr, error) {
 	p.setMu.Lock()
 	defer p.setMu.Unlock()
 	now := time.Now()
-	addr, ok := p.cache.addrIn(qname, pool, now)
-	if !ok {
+	addr, mapped := p.cache.addrIn(qname, pool, now)
+	if !mapped {
 		var err error
 		if addr, err = p.allocate(pool, now); err != nil {
 			return netip.Addr{}, err
@@ -71,6 +71,12 @@ func (p *Proxy) synthAddr(qname string, pool netip.Prefix) (netip.Addr, error) {
 	entries := []nft.AllowEntry{{Addr: addr, Timeout: SyntheticTTL}}
 	if err := p.insertLocked(qname, entries, false); err != nil {
 		return netip.Addr{}, err
+	}
+	if !mapped {
+		// A new mapping is saved before it is handed out (see persist.go).
+		if err := p.saveState(); err != nil {
+			return netip.Addr{}, err
+		}
 	}
 	return addr, nil
 }

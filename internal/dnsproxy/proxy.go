@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -72,6 +73,9 @@ type Config struct {
 	Sink      *flowlog.Sink
 	// CountQuery is notified once per query with its verdict. Optional.
 	CountQuery func(sandboxID, verdict string)
+	// StatePath, when set, keeps the DNS cache across daemon restarts (see
+	// persist.go).
+	StatePath string
 }
 
 // Proxy is the DNS proxy for one sandbox.
@@ -95,6 +99,10 @@ type Proxy struct {
 	synthNext netip.Addr
 
 	udp, tcp *dns.Server
+
+	stopFlush chan struct{}
+	flushDone chan struct{}
+	stopOnce  sync.Once
 }
 
 // New creates a stopped proxy.
@@ -115,8 +123,12 @@ func (p *Proxy) apply(s Settings) {
 	p.limiter = rate.NewLimiter(rate.Limit(qps), qps)
 }
 
-// Start binds UDP and TCP listeners on the sandbox's host-side address.
+// Start loads the persisted DNS cache and binds UDP and TCP listeners on
+// the sandbox's host-side address.
 func (p *Proxy) Start() error {
+	if err := p.loadState(); err != nil {
+		return fmt.Errorf("dns state %s: %w", p.cfg.StatePath, err)
+	}
 	addr := p.cfg.Listen.String()
 	pc, err := net.ListenPacket("udp4", addr)
 	if err != nil {
@@ -131,16 +143,27 @@ func (p *Proxy) Start() error {
 	p.tcp = &dns.Server{Listener: ln, Handler: p}
 	go func() { _ = p.udp.ActivateAndServe() }()
 	go func() { _ = p.tcp.ActivateAndServe() }()
+	if p.cfg.StatePath != "" {
+		p.stopFlush, p.flushDone = make(chan struct{}), make(chan struct{})
+		go p.flusher(p.stopFlush, p.flushDone)
+	}
 	return nil
 }
 
-// Stop closes both listeners.
+// Stop closes both listeners and saves the DNS cache. It is idempotent.
 func (p *Proxy) Stop() {
-	for _, s := range []*dns.Server{p.udp, p.tcp} {
-		if s != nil {
-			_ = s.Shutdown()
+	p.stopOnce.Do(func() {
+		for _, s := range []*dns.Server{p.udp, p.tcp} {
+			if s != nil {
+				_ = s.Shutdown()
+			}
 		}
-	}
+		if p.stopFlush != nil {
+			close(p.stopFlush)
+			<-p.flushDone
+			_ = p.saveState()
+		}
+	})
 }
 
 // Reload swaps in new settings and calls repopulate with every cached
@@ -382,6 +405,7 @@ func reply(r *dns.Msg, rcode int) *dns.Msg {
 // cache remembers which allowlisted names resolved to which addresses, for
 // flow-log domain attribution and for repopulating the set on reload.
 type cache struct {
+	dirty  atomic.Bool // changed since the last save
 	mu     sync.Mutex
 	byIP   map[netip.Addr]map[string]time.Time // name -> expiry
 	recent map[netip.Addr]string
@@ -396,6 +420,7 @@ func (c *cache) reset() {
 	defer c.mu.Unlock()
 	c.byIP = map[netip.Addr]map[string]time.Time{}
 	c.recent = map[netip.Addr]string{}
+	c.dirty.Store(true)
 }
 
 func normalizeName(qname string) string { return strings.ToLower(strings.TrimSuffix(qname, ".")) }
@@ -415,6 +440,7 @@ func (c *cache) add(qname string, entries []nft.AllowEntry, now time.Time) {
 		}
 		c.recent[e.Addr] = name
 	}
+	c.dirty.Store(true)
 	c.gcLocked(now)
 }
 

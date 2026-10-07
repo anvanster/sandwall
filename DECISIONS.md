@@ -315,11 +315,18 @@ The relay treats a pool address only as a stand-in for its name and never sends 
 An allowlisted SNI or Host is used as always; an IP-literal Host falls back to the address's mapped name; a pool address with no allowlisted name and no live mapping is refused as `synthetic_unmapped` (HTTP gets 403).
 A pool address is never forwarded by address, even if `allow_cidrs` covers it.
 
-A restarted daemon keeps `allow_<k>` but not the mappings, which live only in memory.
-Connections that carry their name (TLS with SNI, HTTP with a name in `Host`) keep working; ones that do not are refused as `synthetic_unmapped` until the client looks the name up again.
-Persisting the mappings would close that gap; nameless connections to a proxied destination are rare enough that it is not done yet.
+A restarted daemon keeps `allow_<k>` and, since the DNS cache is persisted (next section), the mappings too, so a pool address keeps meaning the same name.
+Only if the cache was lost (a crash within the 2s flush window for a refresh, or a deleted state file) are connections to earlier pool addresses that carry no name refused as `synthetic_unmapped`, until the client looks the name up again; connections that carry their name keep working either way.
 
-`test/e2e/synthetic.sh` checks that pool answers never reach the site resolver (whose nameserver records every query), that the proxy only ever sees names, that an IP-literal Host reaches the proxy as the mapped name, that `no_proxy` names resolve for real and go direct, and the behavior after a restart.
+### The DNS cache survives restarts
+Each sandbox's DNS cache (which allowlisted name resolved to which address, until when) is saved to `<state-dir>/dns/<id>.json` (mode 0600) and loaded when the daemon restores the sandbox.
+A restarted daemon already kept the allow sets; without the cache it lost what they meant: synthetic pool addresses mapped to no name, flow logs lost `dst_domain`, and a policy reload refilled the sets from an empty cache, cutting off clients whose cached answers were still valid.
+Saving stays off the DNS answer path: changes are flushed every 2s and when the proxy stops (daemon shutdown, destroy).
+A newly allocated synthetic address is the exception and is written before it is handed out, because a lost mapping could later be given to another name while a client still connects to the address for the first.
+Expired entries are dropped on load, an unreadable file is renamed `*.unreadable` and the sandbox starts with an empty cache, a newly created sandbox starts empty whatever an earlier one of the same ID left, `destroy` deletes the file and `nuke` the directory.
+The file lives outside `<state-dir>/sandboxes/`, whose `*.json` files are read as sandbox records.
+
+`test/e2e/synthetic.sh` checks that pool answers never reach the site resolver (whose nameserver records every query), that the proxy only ever sees names, that an IP-literal Host reaches the proxy as the mapped name, that `no_proxy` names resolve for real and go direct, that after a restart a pool address requested by address alone still reaches the proxy by name with flows still attributed, and that after a restart without the state file it is refused as `synthetic_unmapped`.
 
 ### The absolute-form request line comes from `Host`
 Found while building synthetic DNS: for plain HTTP, the relay set the proxy request's URL to the decided target but left `req.Host` as the sandbox sent it.

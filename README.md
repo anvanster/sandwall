@@ -148,7 +148,7 @@ Names work through their DNS answers, so a `no_proxy` name that shares an addres
 
 If the site resolver answers internal names only, add `--synthetic-dns`.
 Allowlisted names (other than `no_proxy` ones) are then answered from a reserved address pool (`--synthetic-dns-pool`, default `198.18.0.0/15`) without asking the resolver, and the relay asks the proxy for the name behind each pool address, so the proxy does the real resolution.
-Connections to a pool address that carry no allowlisted name and no longer map to one are refused as `synthetic_unmapped`.
+Mappings are kept in the state directory and survive daemon restarts; connections to a pool address that carry no allowlisted name and no longer map to one (the mapping expired) are refused as `synthetic_unmapped`.
 
 ## Policy reference
 

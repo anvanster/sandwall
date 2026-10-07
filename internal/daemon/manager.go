@@ -295,6 +295,13 @@ func (mgr *Manager) recordNoProxy() (bool, error) {
 	}
 	return true, os.WriteFile(path, data, 0o600)
 }
+
+// dnsStatePath keeps a sandbox's DNS cache across restarts. It lives
+// outside recordsDir, whose *.json files are read as sandbox records.
+func (mgr *Manager) dnsStatePath(id string) string {
+	return filepath.Join(mgr.opts.StateDir, "dns", id+".json")
+}
+
 func (mgr *Manager) recordPath(id string) string {
 	return filepath.Join(mgr.recordsDir(), id+".json")
 }
@@ -612,6 +619,13 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 	if err := mgr.sink.Open(rec.ID); err != nil {
 		return err
 	}
+	if !restoring {
+		// A new sandbox starts with an empty DNS cache, whatever an earlier
+		// sandbox of the same ID left behind.
+		if err := os.Remove(mgr.dnsStatePath(rec.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	proxy := dnsproxy.New(dnsproxy.Config{
 		SandboxID:  rec.ID,
 		Index:      sb.Index,
@@ -619,6 +633,7 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 		Insert:     insertAllowed,
 		Sink:       mgr.sink,
 		CountQuery: func(id, verdict string) { mgr.m.DNSQueries.WithLabelValues(id, verdict).Inc() },
+		StatePath:  mgr.dnsStatePath(rec.ID),
 	}, mgr.proxySettings(pol))
 	if rec.Quarantine != nil {
 		proxy.SetQuarantined(true)
@@ -1018,8 +1033,10 @@ func (mgr *Manager) destroy(ctx context.Context, id string) error {
 	err = mgr.teardown(ctx, id, s.addr)
 	_ = mgr.sink.Close(id)
 	mgr.m.Forget(id)
-	if rerr := os.Remove(mgr.recordPath(id)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-		err = errors.Join(err, rerr)
+	for _, path := range []string{mgr.recordPath(id), mgr.dnsStatePath(id)} {
+		if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			err = errors.Join(err, rerr)
+		}
 	}
 	if err == nil {
 		mgr.log.Info("destroyed sandbox", "id", id)
@@ -1086,8 +1103,10 @@ func Cleanup(ctx context.Context, stateDir, chrootBase string) error {
 	if err := nft.Apply(ctx, nft.RenderDeleteTable()); err != nil {
 		errs = append(errs, err)
 	}
-	if err := os.RemoveAll(filepath.Join(stateDir, "sandboxes")); err != nil {
-		errs = append(errs, err)
+	for _, dir := range []string{"sandboxes", "dns"} {
+		if err := os.RemoveAll(filepath.Join(stateDir, dir)); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if err := netns.RestoreHostSysctls(filepath.Join(stateDir, "sysctl-orig.json")); err != nil {
 		errs = append(errs, err)
