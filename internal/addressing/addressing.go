@@ -25,9 +25,14 @@ var (
 	GuestAddr = netip.MustParseAddr("172.16.0.2")
 )
 
-// RelayPort is where each sandbox's upstream-proxy relay listens, on the
-// sandbox's host-side address.
+// RelayPort is where each sandbox's relay listens, on the sandbox's
+// host-side address.
 const RelayPort = 15001
+
+// RelayDirectPort is a second relay listener, behind an upstream proxy,
+// for the SNI check on no_proxy destinations: it dials them directly. The
+// firewall's redirect decides which listener a connection reaches.
+const RelayDirectPort = 15002
 
 // TapName is the tap device name inside every VM-mode netns.
 const TapName = "tap0"

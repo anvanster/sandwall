@@ -280,18 +280,20 @@ Proxy credentials (`Proxy-Authorization`) stay on the host.
 - An HTTP proxy cannot carry UDP. Allowed UDP from a proxied sandbox is rejected with `icmpx admin-prohibited` and logged as `no_proxy_route`, so HTTP/3 clients fall back to TCP at once instead of timing out.
 
 ### `no_proxy`
-Destinations matching `no_proxy` go out directly through the existing masquerade path, whatever the protocol.
-The policy is applied first, so `no_proxy` only changes the route of traffic that is already allowed.
+Destinations matching `no_proxy` get what they would get without a proxy: they go out through the masquerade path, and with the SNI check, TCP to the check ports goes through a relay that dials them directly and QUIC to their DNS-learned addresses is rejected.
+The policy is applied first, so `no_proxy` only changes the route of traffic that is already allowed, never what is checked.
 
 - Addresses and CIDRs go into a global set `direct_cidrs`, since `no_proxy` is a daemon setting.
 - For an allowlisted name that also matches `no_proxy`, the DNS proxy inserts its answers into a per-sandbox set `direct_<k>` as well as `allow_<k>`, in one transaction and with the same timeout. A policy reload repopulates `direct_<k>` from the DNS cache like `allow_<k>`, keeping only names that are still allowlisted.
-- `sb_<k>` accepts anything allowed whose destination is in either set before the TCP-only rules, and a per-sandbox nat chain `sbnat_<k>` (dispatched from `proxy_redirect` through `nat_vmap`) returns early for those destinations instead of redirecting. The redirect needs a per-sandbox chain because `direct_<k>` is per sandbox.
+- `sb_<k>` accepts anything allowed whose destination is in either set before the TCP-only rules (after rejecting QUIC on the check ports to `direct_<k>` addresses, as direct mode does), and a per-sandbox nat chain `sbnat_<k>` (dispatched from `proxy_redirect` through `nat_vmap`) redirects their check-port TCP to the direct relay on `10.200.k.1:15002` and returns early for the rest instead of redirecting to the proxied relay. The redirect needs a per-sandbox chain because `direct_<k>` is per sandbox.
+- The direct relay is a second listener of the sandbox's data plane, configured with no upstream proxy. The firewall's redirect decides which listener a connection reaches, so the relay never has to look up whether an address is a `no_proxy` destination.
 
 Matching follows Go's `net/http` proxy rules: `example.com` matches the name and its subdomains, `.example.com` or `*.example.com` only subdomains.
 Unlike allowlist patterns, single-label suffixes such as `.corp` are accepted, because a `no_proxy` entry cannot widen access.
 Ports are ignored (`host:8080` applies to every port, which only widens the entry), IPv6 and unparsable entries are skipped with a warning, and a lone `*` is an error, as it would turn the proxy off.
 
-Like the allow set, the direct set is keyed by address: once a `no_proxy` name resolves to an address, every allowed connection to that address goes direct, including other allowlisted names served from it (and so without the relay's SNI/Host check).
+Like the allow set, the direct set is keyed by address: once a `no_proxy` name resolves to an address, every allowed connection to that address goes direct, including other allowlisted names served from it.
+On the check ports those connections still go through the SNI/Host check, so a non-allowlisted name served from the same address is refused; before the direct relay existed, `no_proxy` destinations skipped the check entirely.
 
 A restarted daemon keeps the DNS-learned `direct_<k>` entries, as it keeps `allow_<k>`, so clients with cached answers keep their direct route.
 If `no_proxy` changed since the previous run (the effective list is stored in the state directory as `no-proxy.json`), restore empties `direct_<k>` instead, so a removed entry cannot keep sending traffic direct until its timeout.
@@ -355,7 +357,7 @@ Both survive a daemon restart or crash; relayed connections end only when the da
 `test/e2e/proxy.sh` runs a fake upstream proxy (`proxy.py`) in the `egattacker` netns that logs every request line.
 It checks that allowlisted HTTP arrives in absolute form and TLS as `CONNECT <name>:<port>`, both with sandwall's credentials and never the sandbox's; that a non-allowlisted SNI or Host to an allowed address is refused and never reaches the proxy; that a sandbox using the proxy address as its own proxy only reaches the relay; that a proxy refusal is logged with its status; that the relay port, UDP, blocked and non-allowlisted destinations behave as designed; that a reload applies to new connections; and that the relay comes back after a daemon restart.
 With `REAL_PROXY` set it also fetches `https://pypi.org` through a real site proxy, on a host with no direct egress.
-Two more daemon runs check `no_proxy` by address and by name: the fetch reaches the origin without the proxy or the relay seeing it, allowed UDP is not rejected, and the direct set survives a restart with the same `no_proxy` but is reset when it changes.
+Two more daemon runs check `no_proxy` by address and by name: a fetch on an unchecked port reaches the origin without the proxy or the relay seeing it, allowed UDP is not rejected, HTTP and TLS on 80 and 443 go through the direct relay (a fronted `Host` gets 403, a fronted SNI is refused as `sni_mismatch`) without reaching the proxy, QUIC to a `no_proxy` name's address is rejected, and the direct set survives a restart with the same `no_proxy` but is reset when it changes.
 In the test the proxy shares the attacker address, which the test exempts from the blocked ranges; a real proxy on a private address stays blocked for sandboxes.
 
 ## S1: SNI/Host check
@@ -395,7 +397,7 @@ Behind an upstream proxy it has no effect (all allowed TCP goes through the rela
 
 ### What it does not cover
 Ports outside `--sni-check-ports` are forwarded unchecked; behind an upstream proxy every port goes through the relay.
-`no_proxy` destinations bypass the relay.
+`no_proxy` destinations get the check on the check ports only, as in direct mode.
 The HTTP `Host` inside TLS is not visible without TLS interception, so domain fronting through an allowlisted SNI remains possible.
 
 ### Testing

@@ -79,6 +79,18 @@ func TestRenderSandboxProxied(t *testing.T) {
 	golden(t, "sandbox-proxy.nft", got)
 }
 
+// Behind a proxy with the SNI check (the default): no_proxy destinations
+// get the check through the direct relay.
+func TestRenderSandboxProxiedSNICheck(t *testing.T) {
+	got, err := RenderSandbox(SandboxConfig{
+		Index: 7, AllowCIDRs: []string{"203.0.113.0/24"}, MaxConns: 64, NewConnsPerSec: 20, Proxied: true, SNICheck: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "sandbox-proxy-sni.nft", got)
+}
+
 func TestRenderBaseSNICheck(t *testing.T) {
 	golden(t, "base-sni.nft", RenderBase(BaseConfig{BlockedRanges: DefaultBlockedRanges, SNICheck: true}))
 }

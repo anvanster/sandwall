@@ -57,6 +57,10 @@ type RelayConfig struct {
 	Upstream  string         `json:"upstream,omitempty"`
 	Synthetic netip.Prefix   `json:"synthetic,omitempty"`
 	Settings  relay.Settings `json:"settings"`
+	// DirectListen, behind an upstream proxy with the SNI check, is a
+	// second relay that dials no_proxy destinations directly; the firewall
+	// redirects their check-port connections there. Zero means none.
+	DirectListen netip.AddrPort `json:"direct_listen,omitempty"`
 }
 
 // Policy is a hot reload: new DNS and relay settings, and the sandbox's
@@ -95,6 +99,7 @@ func (c Config) Hash() string {
 		Synthetic            netip.Prefix
 		Relay                bool
 		RelayListen          netip.AddrPort
+		DirectListen         netip.AddrPort
 		Upstream             string
 	}
 	s := structural{
@@ -103,7 +108,7 @@ func (c Config) Hash() string {
 		DNSListen: c.DNSListen, Synthetic: c.DNS.Synthetic,
 	}
 	if c.Relay != nil {
-		s.Relay, s.RelayListen, s.Upstream = true, c.Relay.Listen, c.Relay.Upstream
+		s.Relay, s.RelayListen, s.DirectListen, s.Upstream = true, c.Relay.Listen, c.Relay.DirectListen, c.Relay.Upstream
 	}
 	data, _ := json.Marshal(s)
 	sum := sha256.Sum256(data)

@@ -89,7 +89,7 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger, hooks Hooks) error {
 	}
 	defer proxy.Stop()
 
-	var rl *relay.Relay
+	var relays []*relay.Relay
 	if cfg.Relay != nil {
 		var up *relay.Upstream
 		if cfg.Relay.Upstream != "" {
@@ -97,31 +97,43 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger, hooks Hooks) error {
 				return err
 			}
 		}
-		rl = relay.New(relay.Config{
-			SandboxID: cfg.SandboxID,
-			Listen:    cfg.Relay.Listen,
-			Upstream:  up,
-			Domain:    proxy.Domain,
-			Synthetic: cfg.Relay.Synthetic,
-			Sink:      sink,
-			Count: func(_, result, _ string) {
-				cnt.mu.Lock()
-				cnt.relay[result]++
-				cnt.mu.Unlock()
-			},
-			Log:     log,
-			OrigDst: hooks.OrigDst,
-		}, cfg.Relay.Settings)
-		if cfg.Quarantined {
-			rl.SetQuarantined(true)
+		count := func(_, result, _ string) {
+			cnt.mu.Lock()
+			cnt.relay[result]++
+			cnt.mu.Unlock()
 		}
-		if err := rl.Start(); err != nil {
+		start := func(listen netip.AddrPort, up *relay.Upstream, synthetic netip.Prefix) error {
+			rl := relay.New(relay.Config{
+				SandboxID: cfg.SandboxID, Listen: listen, Upstream: up, Domain: proxy.Domain,
+				Synthetic: synthetic, Sink: sink, Count: count, Log: log, OrigDst: hooks.OrigDst,
+			}, cfg.Relay.Settings)
+			if cfg.Quarantined {
+				rl.SetQuarantined(true)
+			}
+			if err := rl.Start(); err != nil {
+				return err
+			}
+			relays = append(relays, rl)
+			return nil
+		}
+		defer func() {
+			for _, rl := range relays {
+				rl.Stop()
+			}
+		}()
+		if err := start(cfg.Relay.Listen, up, cfg.Relay.Synthetic); err != nil {
 			return err
 		}
-		defer rl.Stop()
+		// no_proxy destinations are dialed directly; they never get synthetic
+		// addresses, as no_proxy names are resolved for real.
+		if cfg.Relay.DirectListen.IsValid() {
+			if err := start(cfg.Relay.DirectListen, nil, netip.Prefix{}); err != nil {
+				return err
+			}
+		}
 	}
 
-	srv := &server{cfg: cfg, proxy: proxy, relay: rl, counters: cnt, apply: hooks.ApplyNFT, log: log, quarantined: cfg.Quarantined}
+	srv := &server{cfg: cfg, proxy: proxy, relays: relays, counters: cnt, apply: hooks.ApplyNFT, log: log, quarantined: cfg.Quarantined}
 	ln, err := listenControl(cfg.Socket)
 	if err != nil {
 		return err
@@ -161,7 +173,7 @@ func listenControl(path string) (net.Listener, error) {
 type server struct {
 	cfg      Config
 	proxy    *dnsproxy.Proxy
-	relay    *relay.Relay
+	relays   []*relay.Relay
 	counters *counters
 	apply    func(ctx context.Context, script string) error
 	log      *slog.Logger
@@ -237,8 +249,8 @@ func (s *server) applyPolicy(ctx context.Context, p Policy) error {
 		_ = s.proxy.Reload(old, func(_, _ []nft.AllowEntry) error { return nil })
 		return fmt.Errorf("policy reload: %w", err)
 	}
-	if s.relay != nil {
-		s.relay.Reload(p.Relay)
+	for _, rl := range s.relays {
+		rl.Reload(p.Relay)
 	}
 	s.policy = &p
 	return nil
@@ -255,8 +267,8 @@ func (s *server) setQuarantined(q bool) {
 	}
 	s.quarantined = q
 	s.proxy.SetQuarantined(q)
-	if s.relay != nil {
-		s.relay.SetQuarantined(q)
+	for _, rl := range s.relays {
+		rl.SetQuarantined(q)
 	}
 }
 

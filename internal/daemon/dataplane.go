@@ -51,6 +51,9 @@ func (mgr *Manager) dataplaneConfig(s *sandbox) dataplane.Config {
 		}
 		if mgr.opts.UpstreamProxy != nil {
 			cfg.Relay.Upstream = mgr.opts.UpstreamProxy.URL().String()
+			if mgr.opts.SNICheck {
+				cfg.Relay.DirectListen = netip.AddrPortFrom(s.addr.HostAddr, addressing.RelayDirectPort)
+			}
 		}
 	}
 	return cfg

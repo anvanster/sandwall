@@ -89,8 +89,9 @@ count_events() { jq -c "select($2)" "$LOGS/$1.jsonl" | wc -l; }
 k=$(sb_field t1 .index)
 direct_set() { nft -j list set inet sandwall "direct_$k" | jq -r '[.nftables[].set.elem // empty | .[] | (.elem.val // .)] | join(" ")'; }
 
-# direct_ok <desc>: b.attacker.test fetched without the proxy or the relay
-# seeing it, and allowed UDP delivered.
+# direct_ok <desc>: b.attacker.test reached without the proxy. Ports outside
+# the SNI check go straight out; 80 and 443 go through the direct relay,
+# which checks the name and dials the origin itself.
 direct_ok() {
 	local plines relayed
 	plines=$(wc -l <"$PLOG")
@@ -98,9 +99,31 @@ direct_ok() {
 	expect_eq "$1: curl succeeds" \
 		"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' "http://b.attacker.test:$ATTACKER_PORT/")" 200
 	expect_eq "$1: the proxy saw nothing" "$(wc -l <"$PLOG")" "$plines"
-	expect_eq "$1: the relay saw nothing" "$(count_events t1 '.type=="relay"')" "$relayed"
+	expect_eq "$1: the relay saw nothing on an unchecked port" "$(count_events t1 '.type=="relay"')" "$relayed"
 	udp_delivered t1 "$1: allowed UDP delivered"
+
+	expect_eq "$1: HTTP on port 80 succeeds" \
+		"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' http://b.attacker.test/)" 200
+	expect_eq "$1: through the direct relay, not the proxy" \
+		"$(count_events t1 ".type==\"relay\" and .verdict==\"allow\" and .http_host==\"b.attacker.test\" and .target==\"$A:80\" and (.proxy_status|not)")" 1
+	expect_eq "$1: a fronted Host gets 403" \
+		"$(sbx t1 curl -sS -m 10 -o /dev/null -w '%{http_code}' -H 'Host: evil.test' http://b.attacker.test/)" 403
+	sbx t1 curl -sk -m 3 https://b.attacker.test/ >/dev/null 2>&1
+	expect_eq "$1: TLS on 443 checked by the direct relay" \
+		"$(count_events t1 ".type==\"relay\" and .verdict==\"allow\" and .sni==\"b.attacker.test\" and .target==\"$A:443\"")" 1
+	expect_fail "$1: a fronted SNI is refused" sbx t1 curl -sk -m 5 --resolve "evil.test:443:$A" https://evil.test/
+	expect_eq "$1: as sni_mismatch" \
+		"$(count_events t1 '.type=="relay" and .reason=="sni_mismatch" and .sni=="evil.test" and .dst_port==443')" 1
+	expect_eq "$1: the proxy still saw nothing" "$(wc -l <"$PLOG")" "$plines"
+	# Each run checks against fresh counts.
+	: >"$LOGS/t1.jsonl"
 }
+
+# HTTP on 80 and a TCP hold server on 443 (it never answers TLS, so only the
+# relay's decision is checked), for the no_proxy runs.
+ip netns exec "$ATTACKER_NS" python3 "$E2E_DIR/attacker.py" --bind "$A" --port 80 --hold-port 443 \
+	--loot "$T/loot-80.txt" >"$T/attacker-80.log" 2>&1 &
+for _ in $(seq 50); do curl -s -m 1 "http://$A/" >/dev/null && break; sleep 0.1; done
 
 log "no_proxy by address"
 stop_daemon
@@ -114,6 +137,9 @@ start_daemon "${PROXY_FLAGS[@]}" --no-proxy ".attacker.test" || exit 1
 expect_eq "direct_cidrs emptied" "$(nft -j list set inet sandwall direct_cidrs | jq -r '.nftables[].set.elem // empty | .[]')" ""
 expect_eq "b.attacker.test resolves" "$(dns_status t1 b.attacker.test)" NOERROR
 expect_eq "its address entered direct_$k" "$(direct_set)" "$A"
+sbx t1 bash -c "echo x >/dev/udp/$A/443"
+wait_log t1 "QUIC to a no_proxy name's address rejected" \
+	".type==\"deny\" and .proto==\"udp\" and .dst_port==443 and .dst_ip==\"$A\" and .reason==\"quic_blocked\""
 direct_ok "no_proxy name"
 stop_daemon
 start_daemon "${PROXY_FLAGS[@]}" --no-proxy ".attacker.test" || exit 1

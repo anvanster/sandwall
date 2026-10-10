@@ -143,7 +143,7 @@ Allowed TCP, on every port, then goes to the relay (see above), which tunnels it
 
 The sandbox cannot reach the proxy itself, and proxy credentials never enter it.
 `--no-proxy` (or `no_proxy`) lists names, IPv4 addresses and CIDRs that bypass the proxy, with Go's `no_proxy` rules: `example.com` covers its subdomains too, `.example.com` only the subdomains, and ports are ignored.
-Allowed traffic to them, UDP included, is forwarded as without a proxy; the policy still applies first, so a `no_proxy` entry never allows anything.
+Allowed traffic to them, UDP included, is handled as without a proxy: forwarded directly, with the SNI/Host check on `--sni-check-ports` (and QUIC to their DNS-learned addresses rejected); the policy still applies first, so a `no_proxy` entry never allows anything.
 Names work through their DNS answers, so a `no_proxy` name that shares an address with other allowlisted names (a CDN, say) takes them direct too.
 
 If the site resolver answers internal names only, add `--synthetic-dns`.
@@ -211,7 +211,7 @@ Rule order for traffic leaving the host:
 
 Traffic to the host itself is dropped (`host_access`), except DNS to the sandbox's own proxy.
 With the SNI check, step 7 first rejects QUIC to DNS-learned addresses (`quic_blocked`), and accepted TCP to the SNI check ports (80 and 443 by default) goes on to the relay.
-With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (forwarded directly) and otherwise only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
+With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (forwarded directly, its check-port TCP through a relay that dials it directly) and otherwise only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
 
 ## Quarantine
 
@@ -356,7 +356,7 @@ With an upstream proxy, export goes through it, except to loopback and `no_proxy
 
 ## Known gaps
 
-- **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, the SNI/Host check stops TLS and HTTP to it on ports 80 and 443 (any port behind an upstream proxy). Other ports, `no_proxy` destinations and `--sni-check=false` leave it reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup).
+- **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, the SNI/Host check stops TLS and HTTP to it on ports 80 and 443 (any port behind an upstream proxy). Other ports (outside `--sni-check-ports` without a proxy, or to `no_proxy` destinations) and `--sni-check=false` leave it reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup).
 - **Domain fronting.** Without TLS interception, the HTTP `Host` inside TLS is invisible, so a CDN that routes by that header can be reached through an allowlisted SNI. TLS Encrypted Client Hello would hide the SNI too; sandwall suppresses the HTTPS/SVCB records that carry ECH configs, and a client without them sends a cleartext SNI.
 - **Shared platforms behind exact names.** The wildcard lint cannot help with exact names that serve many users' content, such as `raw.githubusercontent.com` or `gist.github.com`; allowlisting them lets the sandbox fetch anything hosted there.
 - **Allowlisted names are an exfiltration channel if their owner is hostile.** A wildcard such as `*.example.com` lets the sandbox query any subdomain, and those queries do reach `example.com`'s nameservers. Only allowlist zones you trust.

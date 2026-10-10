@@ -353,8 +353,14 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 		chain, cfg.MaxConns, LogGroup, LogPrefix(k, ReasonConnLimit))
 	// 7-8. Allowlist.
 	if cfg.Proxied {
-		// no_proxy destinations are forwarded as without a proxy (sbnat_<k>
-		// does not redirect them), whatever the protocol.
+		// no_proxy destinations get what they would get without a proxy:
+		// forwarded, except that with the SNI check, TCP to the check ports
+		// goes through the direct relay (sbnat_<k>) and QUIC to DNS-learned
+		// addresses is rejected.
+		if cfg.SNICheck {
+			b.line("%s ip daddr @direct_%d ip daddr @allow_%d ip daddr != @allow_cidr_%d udp dport { %s } counter log group %d prefix %q jump conn_reject",
+				chain, k, k, k, joinInts(cfg.sniPorts()), LogGroup, LogPrefix(k, ReasonQUICBlocked))
+		}
 		for _, direct := range []string{fmt.Sprintf("@direct_%d", k), "@direct_cidrs"} {
 			for _, set := range []string{"allow", "allow_cidr"} {
 				b.line("%s ip daddr %s ip daddr @%s_%d accept", chain, direct, set, k)
@@ -390,6 +396,9 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 		// connecting to the relay port directly is host access.
 		b.line("%s ip daddr %s tcp dport %d ct status dnat accept", in, sb.HostAddr, addressing.RelayPort)
 	}
+	if cfg.Proxied && cfg.SNICheck {
+		b.line("%s ip daddr %s tcp dport %d ct status dnat accept", in, sb.HostAddr, addressing.RelayDirectPort)
+	}
 	b.line("%s %s", in, logDrop(k, ReasonHostAccess))
 
 	// Runs only for traffic sb_<k> accepted. The redirect target is the
@@ -397,6 +406,12 @@ func RenderSandbox(cfg SandboxConfig) (string, error) {
 	nat := fmt.Sprintf("add rule inet %s sbnat_%d", t, k)
 	switch {
 	case cfg.Proxied:
+		if cfg.SNICheck {
+			for _, direct := range []string{fmt.Sprintf("@direct_%d", k), "@direct_cidrs"} {
+				b.line("%s ip daddr %s tcp dport { %s } fib daddr type != local redirect to :%d",
+					nat, direct, joinInts(cfg.sniPorts()), addressing.RelayDirectPort)
+			}
+		}
 		b.line("%s ip daddr @direct_%d return", nat, k)
 		b.line("%s ip daddr @direct_cidrs return", nat)
 		b.line("%s meta l4proto tcp fib daddr type != local redirect to :%d", nat, addressing.RelayPort)

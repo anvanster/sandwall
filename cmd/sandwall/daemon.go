@@ -261,9 +261,6 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 		for _, n := range noProxyNotes {
 			log.Warn("no_proxy entry", "note", n)
 		}
-		if sniCheck && !slices.Equal(sniPorts, nft.DefaultSNIPorts) {
-			log.Warn("--sni-check-ports has no effect behind an upstream proxy: all allowed TCP goes through the relay and other traffic is rejected")
-		}
 		if synthetic.IsValid() {
 			log.Info("synthetic DNS: allowlisted names are answered from a pool and resolved by the proxy", "pool", synthetic)
 		}
