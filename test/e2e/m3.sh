@@ -89,7 +89,7 @@ SNAP="$T/snap"
 expect_ok "snapshot v1" sandwall vm snapshot v1 --out "$SNAP"
 expect_ok "v1 keeps running after snapshot" vmx v1 true
 # On nested-virtualization hosts (e.g. a Lima VM on Apple silicon), starting
-# many KVM guests back to back leaves some vCPUs spinning; see DECISIONS.md.
+# many KVM guests back to back leaves some vCPUs spinning; see docs/design.md, "Testing notes".
 expect_ok "clone x$CLONES" sandwall vm clone "$SNAP" --count "$CLONES" --prefix c --stagger "${CLONE_STAGGER:-1s}" --policy "$P/m3-clone.yaml"
 expect_eq "$CLONES clones listed" "$(sandwall sandbox list --json | jq '[.[] | select(.id|startswith("c-"))] | length')" "$CLONES"
 expect_eq "every clone's VM running" "$(sandwall sandbox list --json | jq '[.[] | select(.id|startswith("c-")) | select(.vm.running)] | length')" "$CLONES"
@@ -108,7 +108,7 @@ expect_eq "clone rate limiter from its own policy" "$(fc_api c-1 /vm/config | jq
 # Every clone fetches through its own name, so attribution is checkable.
 # Fetches run concurrently in waves of FETCH_CONCURRENCY. On a nested-
 # virtualization host, more simultaneously busy guests than the host VM has
-# CPUs stalls guests (see DECISIONS.md); on bare metal set it to $CLONES.
+# CPUs stalls guests (see docs/design.md, "Testing notes"); on bare metal set it to $CLONES.
 wave=${FETCH_CONCURRENCY:-8}
 ok=0
 overlapping_waves=0

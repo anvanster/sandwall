@@ -63,7 +63,7 @@ wait "$HOLD"
 held=$(jq .connected "$T/t3-hold.json")
 if ((held >= 1 && held <= 64)); then pass "t3 never exceeded max_conns ($held held)"; else fail "t3 held $held connections"; fi
 # nf_conncount prunes closed and rejected entries lazily, so right after a
-# burst the limit is temporarily stricter (see DECISIONS.md). It must
+# burst the limit is temporarily stricter (see docs/design.md, "Connection limits"). It must
 # recover to the full 64 within a few seconds of further attempts.
 wait_closed 10.200.3.2 "$ATTACKER_HOLD_PORT"
 recovered=0

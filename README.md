@@ -19,6 +19,9 @@ sandwall gives every sandbox its own network namespace and enforces policy from 
 
 The sandbox needs no cooperation and no code changes.
 
+> **Status:** early.
+> sandwall runs on a single Linux host, its API is a root-only unix socket with no further authentication, and the CLI, policy format and log schema may still change.
+
 ```
 $ sudo demo/exfil.sh
 == (a) open sandbox: own netns, NAT to anywhere
@@ -55,17 +58,22 @@ the same allowlisted fetch, now from the quarantined sandbox:
 ## How it works
 
 ```
-[exec mode]  process ───────────────────────────┐
-[vm mode]    guest eth0 → tap0 → (netns NAT/DNAT) ┤
-                                                  ▼
-                              veth-s<k>  ⇄  veth-h<k>   (host netns)
-                                                │
-                     host nftables: table inet sandwall
-                       prerouting → sb_<k>  (policy for traffic leaving the host)
-                       input   → sbin_<k>   (only DNS to this sandbox's proxy)
-                       postrouting: masquerade to the uplink
-                                                ▼
-                                             uplink
+[exec mode]  process ───────────────────────────────┐
+[vm mode]    guest eth0 → tap0 → (netns NAT/DNAT) ──┤
+                                                    ▼
+                          veth-s<k>  ⇄  veth-h<k>   (host netns)
+                                            │
+  host nftables, table inet sandwall:       ▼
+    prerouting → sb_<k>     policy: allow, or log and drop
+    dstnat     → sbnat_<k>  allowed TCP to ports 80 and 443 → relay
+    input      → sbin_<k>   only this sandbox's DNS proxy and relay
+                   │                                  │
+                   ▼                                  │ other allowed traffic,
+  data plane process of sandbox k                     │ masqueraded
+    DNS proxy  10.200.k.1:53                          │
+    relay      10.200.k.1:15001  ── name checked ───► │
+                                                      ▼
+                                                   uplink
 ```
 
 Sandbox *k* lives in netns `sb<k>`, connected to the host by a veth pair on `10.200.k.0/30`.
@@ -79,18 +87,21 @@ DNS to any other server, including DNS-over-TLS on port 853, is dropped and logg
 Everything is keyed by sandbox, never by IP address.
 That is what lets Firecracker clones share one guest identity: each clone's `tap0` and `172.16.0.2` live in its own netns, which masquerades the guest to `10.200.k.2` before the host sees it.
 
+Each sandbox's DNS proxy and relay run in a data plane process of their own, which outlives the daemon: DNS and relayed connections keep working through a daemon restart or crash, enforcing the last policy applied.
+
 Rulesets are generated as text and applied atomically with `nft -f`.
 sandwall only ever touches its own `inet sandwall` table (and `ip sandwall_vm` inside VM-mode namespaces).
+The [design document](docs/design.md) explains each part and the measurements behind it.
 
 ## Quickstart
 
-Requirements: Linux 5.10+, root, `nftables`, `iproute2`, `util-linux` (`setpriv`), and Go 1.26 to build.
+Requirements: Linux (tested on kernels 6.8 and 6.19), root, `nftables`, `iproute2`, `util-linux` (`setpriv`), and Go 1.26 to build.
 VM mode also needs `/dev/kvm` and the Firecracker `firecracker` and `jailer` binaries.
 Try it in a disposable VM: sandwall changes host firewall rules and sysctls (it restores the sysctls on `nuke`).
 
 ```sh
 make build                              # bin/sandwall
-sudo bin/sandwall daemon &               # DNS proxies, log collectors, metrics on :9464, API on /run/sandwall.sock
+sudo bin/sandwall daemon &               # API on /run/sandwall.sock, metrics on :9464
 
 sudo bin/sandwall sandbox create agent --policy demo/policy.yaml
 sudo bin/sandwall sandbox exec agent -- curl -sI https://pypi.org/    # allowed
@@ -102,6 +113,8 @@ sudo bin/sandwall sandbox destroy agent
 sudo bin/sandwall nuke                                  # remove everything sandwall created
 ```
 
+`sandbox exec` runs the command inside the sandbox's netns as `nobody`, with every capability dropped, so nothing in it can change its own network configuration.
+
 ### SNI/Host check
 
 Allowed TCP connections to ports 80 and 443 (`--sni-check-ports` changes the list) go through a per-sandbox relay on `10.200.k.1:15001`.
@@ -110,10 +123,7 @@ There is no TLS termination.
 QUIC (UDP to the same ports) to DNS-learned addresses is rejected (`quic_blocked`) because its server name cannot be checked; clients fall back to TCP.
 Other ports are forwarded unchecked.
 Add a port only if its clients speak first with TLS or HTTP (`--sni-check-ports 80,443,8443`, say); for a server-first protocol the relay waits 1s for a name before it connects.
-Each sandbox's DNS proxy and relay run in a data plane process of their own, which outlives the daemon: relayed connections and DNS keep working through a daemon restart or crash.
 Turn it off with `daemon --sni-check=false`.
-
-`sandbox exec` runs the command inside the sandbox's netns as `nobody`, with every capability dropped, so nothing in it can change its own network configuration.
 
 ### VM mode
 
@@ -136,7 +146,8 @@ On networks where only an HTTP proxy reaches the internet, start the daemon with
 The proxy is a next hop, not a destination: the sandbox needs no proxy settings and still connects to real addresses, and sandwall still applies the policy to them.
 Allowed TCP, on every port, then goes to the relay (see above), which tunnels it through the proxy:
 
-- TLS: `CONNECT <SNI>:<port>`. The SNI must be allowlisted (or the address inside `allow_cidrs`), otherwise the connection is reset and logged as `sni_mismatch`.
+- TLS: `CONNECT <SNI>:<port>`.
+  The SNI must be allowlisted (or the address inside `allow_cidrs`), otherwise the connection is reset and logged as `sni_mismatch`.
 - Plain HTTP: each request is forwarded in absolute form, and every request's `Host` is checked (`host_mismatch`, answered with 403).
 - Other TCP: `CONNECT` with the name the sandbox resolved for that address.
 - UDP to an allowed address is rejected (`no_proxy_route`), so HTTP/3 clients fall back to TCP, unless the address is a `no_proxy` destination.
@@ -180,6 +191,24 @@ quarantine:                      # optional: quarantine automatically (see Quara
 ```
 
 Unknown keys are rejected, so a typo fails loudly instead of silently allowing nothing or everything.
+`policy apply` re-renders the sandbox's chain and repopulates its allow set atomically, updates tc and Firecracker limits, and leaves established connections alone.
+
+### Rule order
+
+For traffic leaving the host:
+
+1. Established and related traffic is accepted.
+2. DNS or DNS-over-TLS to anything but the sandbox's proxy is dropped (`dns_bypass`).
+3. IPv6 is dropped; it is disabled inside sandboxes.
+4. Private, link-local, metadata, multicast, reserved and sandbox transfer ranges are dropped (`blocked_range`).
+5. New connections above `new_conns_per_sec` are dropped (`rate_limit`).
+6. New connections above `max_conns` are rejected with a TCP reset (`conn_limit`).
+7. Addresses learned from allowlisted DNS answers, and `allow_cidrs`, are accepted.
+8. Everything else is dropped (`not_allowed`).
+
+Traffic to the host itself is dropped (`host_access`), except DNS to the sandbox's own proxy.
+With the SNI check, step 7 first rejects QUIC to DNS-learned addresses (`quic_blocked`), and accepted TCP to the SNI check ports (80 and 443 by default) goes on to the relay.
+With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (forwarded directly, its check-port TCP through a relay that dials it directly) and otherwise only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
 
 ### Wildcards over shared hosting
 
@@ -196,22 +225,6 @@ egress:
 Prefer exact names (`my-app.vercel.app`) or a wildcard under one tenant (`*.my-app.vercel.app`).
 The list is embedded in the binary; `make psl-update` refreshes it.
 A policy already stored when the list changes keeps loading, with a warning in the daemon log.
-`policy apply` re-renders the sandbox's chain and repopulates its allow set atomically, updates tc and Firecracker limits, and leaves established connections alone.
-
-Rule order for traffic leaving the host:
-
-1. Established and related traffic is accepted.
-2. DNS or DNS-over-TLS to anything but the sandbox's proxy is dropped (`dns_bypass`).
-3. IPv6 is dropped; it is disabled inside sandboxes.
-4. Private, link-local, metadata, multicast, reserved and sandbox transfer ranges are dropped (`blocked_range`).
-5. New connections above `new_conns_per_sec` are dropped (`rate_limit`).
-6. New connections above `max_conns` are rejected with a TCP reset (`conn_limit`).
-7. Addresses learned from allowlisted DNS answers, and `allow_cidrs`, are accepted.
-8. Everything else is dropped (`not_allowed`).
-
-Traffic to the host itself is dropped (`host_access`), except DNS to the sandbox's own proxy.
-With the SNI check, step 7 first rejects QUIC to DNS-learned addresses (`quic_blocked`), and accepted TCP to the SNI check ports (80 and 443 by default) goes on to the relay.
-With an upstream proxy, step 7 accepts anything to a `no_proxy` destination (forwarded directly, its check-port TCP through a relay that dials it directly) and otherwise only TCP, which goes on to the relay; anything else to an allowed address is rejected (`no_proxy_route`).
 
 ## Quarantine
 
@@ -276,7 +289,8 @@ Each delivery is a JSON `POST` of up to 100 events, sent at most every 2 seconds
 ```
 
 The events are the same objects as in the sandbox's log.
-With `--webhook-secret`, requests carry `X-Sandwall-Timestamp` and `X-Sandwall-Signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<body>` keyed with the file's contents (at least 16 bytes). Receivers should check it, and reject old timestamps:
+With `--webhook-secret`, requests carry `X-Sandwall-Timestamp` and `X-Sandwall-Signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<body>` keyed with the file's contents (at least 16 bytes).
+Receivers should check it, and reject old timestamps:
 
 ```python
 want = "sha256=" + hmac.new(key, ts.encode() + b"." + body, hashlib.sha256).hexdigest()
@@ -343,47 +357,71 @@ With an upstream proxy, export goes through it, except to loopback and `no_proxy
 
 - The host and the sandwall daemon are trusted, and only root can reach the API socket (`/run/sandwall.sock`, mode 0600).
 - Exec-mode processes run as `nobody` without capabilities, so they cannot change addresses, routes or firewall rules in their netns.
-- In VM mode the guest is fully untrusted. It only controls its own kernel; everything that enforces policy lives in the netns or on the host.
+- In VM mode the guest is fully untrusted.
+  It only controls its own kernel; everything that enforces policy lives in the netns or on the host.
 
 **What it guarantees:**
 
 - No connection leaves the host unless its destination was returned by an allowlisted DNS answer or is in `allow_cidrs`.
   Behind an upstream proxy, the proxy is only ever asked for allowlisted names, addresses in `allow_cidrs`, or addresses the firewall already admitted.
 - No DNS query for a name that is not allowlisted reaches any resolver.
-- Policy is enforced fail-closed. A sandbox interface without rules is dropped. While the daemon is down, each sandbox's data plane keeps enforcing the last policy applied; if it dies too, nothing answers the sandbox's DNS until the daemon restarts it.
+- Policy is enforced fail-closed.
+  A sandbox interface without rules is dropped.
+  While the daemon is down, each sandbox's data plane keeps enforcing the last policy applied; if it dies too, nothing answers the sandbox's DNS until the daemon restarts it.
 
 **Out of scope:** payload inspection, TLS interception, ingress, IPv6 and multi-host deployment.
 
 ## Known gaps
 
-- **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, the SNI/Host check stops TLS and HTTP to it on ports 80 and 443 (any port behind an upstream proxy). Other ports (outside `--sni-check-ports` without a proxy, or to `no_proxy` destinations) and `--sni-check=false` leave it reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup).
-- **Domain fronting.** Without TLS interception, the HTTP `Host` inside TLS is invisible, so a CDN that routes by that header can be reached through an allowlisted SNI. TLS Encrypted Client Hello would hide the SNI too; sandwall suppresses the HTTPS/SVCB records that carry ECH configs, and a client without them sends a cleartext SNI.
+- **Shared CDN addresses.** If a non-allowlisted domain is served from the same IP as an allowlisted one, the SNI/Host check stops TLS and HTTP to it on ports 80 and 443 (any port behind an upstream proxy).
+  Other ports (outside `--sni-check-ports` without a proxy, or to `no_proxy` destinations) and `--sni-check=false` leave it reachable by IP until that address's set entry expires (at most 300s after the last allowlisted lookup).
+- **Domain fronting.** Without TLS interception, the HTTP `Host` inside TLS is invisible, so a CDN that routes by that header can be reached through an allowlisted SNI.
+  TLS Encrypted Client Hello would hide the SNI too; sandwall suppresses the HTTPS/SVCB records that carry ECH configs, and a client without them sends a cleartext SNI.
 - **Shared platforms behind exact names.** The wildcard lint cannot help with exact names that serve many users' content, such as `raw.githubusercontent.com` or `gist.github.com`; allowlisting them lets the sandbox fetch anything hosted there.
-- **Allowlisted names are an exfiltration channel if their owner is hostile.** A wildcard such as `*.example.com` lets the sandbox query any subdomain, and those queries do reach `example.com`'s nameservers. Only allowlist zones you trust.
-- **Connection-limit recovery is lazy.** The kernel's `ct count` prunes closed and rejected connections only when new ones are attempted. Right after a burst, the limit can be stricter than configured for a few seconds. It never lets more connections through.
-- **No IPv6.** It is disabled inside sandboxes. AAAA, HTTPS and SVCB queries get empty answers, so clients fall back to IPv4.
+- **Allowlisted names are an exfiltration channel if their owner is hostile.** A wildcard such as `*.example.com` lets the sandbox query any subdomain, and those queries do reach `example.com`'s nameservers.
+  Only allowlist zones you trust.
+- **Connection-limit recovery is lazy.** The kernel's `ct count` prunes closed and rejected connections only when new ones are attempted.
+  Right after a burst, the limit can be stricter than configured for a few seconds.
+  It never lets more connections through.
+- **Refused relay connections look accepted.** With the SNI check, the sandbox's TCP handshake completes with the relay before the relay connects onward, so a destination that refuses the connection appears to the sandbox as an accepted connection that is then reset (logged as `dial_error`).
+- **No IPv6.** It is disabled inside sandboxes.
+  AAAA, HTTPS and SVCB queries get empty answers, so clients fall back to IPv4.
 - **Single host.** There is no fleet management, central UI or API authentication.
-
-Design decisions and deviations from the original plan, with the measurements behind them, are in [DECISIONS.md](DECISIONS.md).
-Open work and verification still owed are tracked in [TODO.md](TODO.md).
 
 ## Development
 
 ```sh
-make test         # unit tests: policy parsing, allowlist matching, DNS proxy, golden nftables rulesets
+make build        # bin/sandwall, a static Linux binary
+make test         # unit tests
 make vet fmt-check
-make e2e          # root-only acceptance tests for M1-M3, the SNI check (S1), quarantine, alerts (S2), OTel export (S3) and proxy mode (M3 needs /dev/kvm); run in a disposable VM
-make e2e REAL_PROXY=http://host:port         # on a host without direct internet: every daemon uses the site proxy,
-                                             # and e2e-proxy also fetches real sites through it
 ```
+
+The end-to-end suites run the real binary against a real kernel as root, so run them in a disposable Linux VM:
+
+| Target | Covers |
+|---|---|
+| `make e2e-m1` | Isolation, default deny, DNS allowlists, blocked ranges, DNS bypass and tunneling, hot reload, daemon restart |
+| `make e2e-m2` | Bandwidth limits, connection and rate limits, flow logs, metrics |
+| `make e2e-m3` | Firecracker VMs, snapshots and 20 clones (needs `/dev/kvm`; downloads Firecracker and guest images) |
+| `make e2e-s1` | SNI/Host check, QUIC blocking, `--sni-check-ports` |
+| `make e2e-proxy` | Upstream proxy mode and `no_proxy` |
+| `make e2e-synthetic` | Synthetic DNS |
+| `make e2e-dataplane` | Data planes outliving daemon restarts and crashes |
+| `make e2e-quarantine` | Manual and automatic quarantine, freeze, release |
+| `make e2e-alerts` | Webhooks and their signatures |
+| `make e2e-otel` | OpenTelemetry export |
+| `make e2e` | All of the above |
+| `make e2e-s1-real` | The SNI check against real sites on a shared CDN and `pip install`; needs direct internet (`HTTP3_CURL=/path` adds QUIC checks) |
+| `make e2e-relay-cost` | Benchmark of the relay against `--sni-check=false` |
 
 Every e2e script starts and ends with `sandwall nuke`, uses its own state and log directories, and checks that nothing sandwall created is left behind.
 The "attacker" endpoint is a local listener in its own netns at `10.99.0.1`, so only the allowlist checks need the internet; the proxy test runs a fake upstream proxy there too.
+On a host without direct internet, `make e2e REAL_PROXY=http://host:port` runs every daemon behind the site proxy, and `e2e-proxy` also fetches real sites through it.
 VM-mode paths are configurable for keeping snapshots and jails on one (reflink-capable) filesystem: `make e2e-m3 FC_ASSETS=… CHROOT_BASE=… E2E_TMP=…`.
 
 The demos are `demo/exfil.sh` (the comparison above) and `demo/clones.sh` (20 Firecracker clones with a live, merged `sandwall logs -f`, one of which is quarantined halfway through while the others carry on).
 Behind an HTTP proxy, run them with `REAL_PROXY=http://host:port`.
-On nested-virtualization hosts, such as a Lima VM on Apple silicon, start many VMs with `vm clone --stagger 1s`; see DECISIONS.md.
+Under nested virtualization, start many VMs with `vm clone --stagger` and fewer clones (`CLONES=10 CLONE_STAGGER=3s`); see the [testing notes](docs/design.md#testing-notes).
 
 ## License
 
