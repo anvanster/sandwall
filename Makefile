@@ -14,9 +14,9 @@ E2E_ENV = SANDWALL=$(CURDIR)/$(BIN) $(if $(FC_ASSETS),FC_ASSETS=$(FC_ASSETS)) \
 build:
 	CGO_ENABLED=0 GOOS=linux $(GO) build $(GOFLAGS) -o $(BIN) ./cmd/sandwall
 
-# Unit tests: policy parsing, allowlist matching, DNS proxy logic, golden rulesets.
+# Unit tests; the few that need root skip without it.
 test:
-	$(GO) test ./internal/...
+	$(GO) test ./...
 
 vet:
 	GOOS=linux $(GO) vet ./...
@@ -24,7 +24,7 @@ vet:
 fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
-# Root-only milestone acceptance tests. Run inside a disposable Linux VM.
+# Root-only end-to-end tests. Run inside a disposable Linux VM.
 e2e: e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-quarantine e2e-alerts e2e-otel e2e-synthetic e2e-dataplane
 
 e2e-m1: build
@@ -83,7 +83,7 @@ e2e-m3: build fc-assets
 # Refresh the embedded Public Suffix List used by the allowlist lint.
 psl-update:
 	curl -fsSL https://publicsuffix.org/list/public_suffix_list.dat -o internal/policy/psl/public_suffix_list.dat
-	$(GO) test ./internal/policy/...
+	$(GO) test ./...icy/...
 
 clean:
 	rm -rf bin
