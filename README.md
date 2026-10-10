@@ -95,9 +95,18 @@ The [design document](docs/design.md) explains each part and the measurements be
 
 ## Quickstart
 
-Requirements: Linux (tested on kernels 6.8 and 6.19), root, `nftables`, `iproute2`, `util-linux` (`setpriv`), and Go 1.26 to build.
+Requirements: Linux (tested on kernels 6.8 and 6.19), root, `nftables`, `iproute2`, `util-linux` (`setpriv`), and Go 1.26 to build from source.
 VM mode also needs `/dev/kvm` and the Firecracker `firecracker` and `jailer` binaries.
 Try it in a disposable VM: sandwall changes host firewall rules and sysctls (it restores the sysctls on `nuke`).
+
+Static binaries for amd64 and arm64 are on the [releases page](https://github.com/anvanster/sandwall/releases), with checksums and build provenance:
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify sandwall-<version>-linux-amd64.tar.gz --repo anvanster/sandwall
+```
+
+The commands below use a source build in `bin/`.
 
 ```sh
 make build                              # bin/sandwall
@@ -394,7 +403,11 @@ With an upstream proxy, export goes through it, except to loopback and `no_proxy
 make build        # bin/sandwall, a static Linux binary
 make test         # unit tests
 make vet fmt-check
+make license-check # every compiled-in dependency has a permissive or weak-copyleft license
+make release      # dist/: release archives for amd64 and arm64 (on Linux)
 ```
+
+Pushing a `v*` tag runs the checks, builds the archives with `make release`, and publishes them as a GitHub release.
 
 The end-to-end suites run the real binary against a real kernel as root, so run them in a disposable Linux VM:
 
@@ -428,3 +441,4 @@ Under nested virtualization, start many VMs with `vm clone --stagger` and fewer 
 Copyright 2026 Andrey Vasilevsky.
 Licensed under the [Apache License, Version 2.0](LICENSE).
 The embedded Public Suffix List (`internal/policy/psl/public_suffix_list.dat`) is from [publicsuffix.org](https://publicsuffix.org) and is subject to the Mozilla Public License 2.0, as stated in its header.
+Release archives include the licenses of every Go module compiled into the binary, and of Go itself, in `THIRD_PARTY_LICENSES/`.

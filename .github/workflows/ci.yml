@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call: # the release workflow runs these checks first
 
 permissions:
   contents: read
@@ -12,8 +13,8 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: make build
@@ -23,3 +24,4 @@ jobs:
       # need root and a disposable VM (and /dev/kvm for VM mode), so they are
       # run outside CI: see "Development" in the README.
       - run: make test
+      - run: make license-check

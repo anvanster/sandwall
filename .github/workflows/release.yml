@@ -1,0 +1,40 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 publishes a GitHub release with Linux amd64
+# and arm64 archives (see "make release"), SHA256SUMS and build provenance.
+# A tag with a suffix, such as v0.1.0-rc.1, is marked as a prerelease.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write     # create the release
+      id-token: write     # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make release VERSION="$GITHUB_REF_NAME"
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+            --verify-tag --title "$GITHUB_REF_NAME" --generate-notes "${prerelease[@]}"

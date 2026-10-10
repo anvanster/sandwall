@@ -328,7 +328,7 @@ func runDaemon(ctx context.Context, g *globalFlags, metricsAddr, upstream string
 
 	go func() { errc <- wrap("api", api.Serve(ctx, g.socket, api.NewHandler(mgr))) }()
 
-	log.Info("sandwall daemon started", "socket", g.socket, "metrics", metricsAddr, "sandboxes", len(mgr.List()))
+	log.Info("sandwall daemon started", "version", version, "socket", g.socket, "metrics", metricsAddr, "sandboxes", len(mgr.List()))
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down; sandboxes stay in place and are restored on next start")

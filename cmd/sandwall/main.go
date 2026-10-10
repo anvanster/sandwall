@@ -17,6 +17,9 @@ import (
 	"github.com/anvanster/sandwall/internal/fc"
 )
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 type globalFlags struct {
 	socket     string
 	stateDir   string
@@ -38,6 +41,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "sandwall",
 		Short:         "Egress firewall for AI agent sandboxes",
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
