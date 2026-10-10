@@ -248,6 +248,7 @@ assert_no_remnants() {
 	expect_eq "no sandwall nft table left" "$(nft list tables | grep -c sandwall)" 0
 	expect_eq "no tc qdiscs on sandbox veths" "$(tc qdisc show | grep -c veth-h)" 0
 	expect_eq "no /etc/netns/sb<k> left" "$(find /etc/netns -maxdepth 1 -name 'sb[0-9]*' 2>/dev/null | wc -l)" 0
+	expect_eq "no data plane processes left" "$(pgrep -c -f "[d]ataplane --config $STATE/" || true)" 0
 	expect_eq "no firecracker processes left" "$(pgrep -c -f 'firecracker --id sandwall-sb' || true)" 0
 	expect_eq "no sandwall jails left" "$(find "$CHROOT_BASE" -mindepth 2 -maxdepth 2 -name 'sandwall-sb*' 2>/dev/null | wc -l)" 0
 }

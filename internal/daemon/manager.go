@@ -26,6 +26,7 @@ import (
 
 	"github.com/anvanster/sandwall/internal/addressing"
 	"github.com/anvanster/sandwall/internal/alert"
+	"github.com/anvanster/sandwall/internal/dataplane"
 	"github.com/anvanster/sandwall/internal/dnsproxy"
 	"github.com/anvanster/sandwall/internal/fc"
 	"github.com/anvanster/sandwall/internal/flowlog"
@@ -152,15 +153,16 @@ type sandbox struct {
 	rec    Record
 	addr   addressing.Sandbox
 	policy *policy.Policy
-	proxy  *dnsproxy.Proxy
-	relay  *relay.Relay // nil without an upstream proxy
+	// dp controls the sandbox's data plane process (DNS proxy and relay),
+	// whose files are dpFiles; see dataplane.go.
+	dp      *dataplane.Client
+	dpFiles dataplane.Files
+	follow  context.CancelFunc // stops tailing the data plane's events
 }
 
-// stop closes the sandbox's DNS proxy and relay listeners.
-func (s *sandbox) stop() {
-	s.proxy.Stop()
-	if s.relay != nil {
-		s.relay.Stop()
+func (s *sandbox) stopFollow() {
+	if s.follow != nil {
+		s.follow()
 	}
 }
 
@@ -173,6 +175,11 @@ type Manager struct {
 	wd   *watchdog.Watchdog
 	al   *alert.Dispatcher
 	otlp *otelexport.Exporter // nil without OTLP export
+	// exe is this binary, started as each sandbox's data plane.
+	exe string
+	// bg lives until Close: event followers and the data plane supervisor.
+	bg     context.Context
+	stopBg context.CancelFunc
 
 	// opMu serializes lifecycle operations, which may take seconds (VM
 	// boot, image copies). mu only guards the maps, so log collectors'
@@ -215,10 +222,16 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locate own binary for data planes: %w", err)
+	}
 	mgr := &Manager{
-		opts: opts, log: opts.Log, sink: sink, m: opts.Metrics,
+		opts: opts, log: opts.Log, sink: sink, m: opts.Metrics, exe: exe,
 		byID: map[string]*sandbox{}, byIndex: map[int]*sandbox{},
 	}
+	mgr.bg, mgr.stopBg = context.WithCancel(context.Background())
+	mgr.m.SetDataplaneSource(mgr.dataplaneCounters)
 	mgr.wd = watchdog.New(mgr.autoQuarantine)
 	mgr.al = alert.New(alert.Config{
 		Endpoints: opts.Webhooks,
@@ -233,13 +246,7 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 			return nil, err
 		}
 	}
-	sink.SetObserver(func(ev flowlog.Event) {
-		mgr.wd.Observe(ev)
-		mgr.al.Observe(ev)
-		if mgr.otlp != nil {
-			mgr.otlp.Observe(ev)
-		}
-	})
+	sink.SetObserver(mgr.observe)
 	if err := mgr.ensureHost(ctx); err != nil {
 		return nil, err
 	}
@@ -251,7 +258,19 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 	if err := mgr.restore(ctx); err != nil {
 		return nil, err
 	}
+	go mgr.supervise()
 	return mgr, nil
+}
+
+// observe hands an event to the watchdog, alerts and OTel export. The
+// daemon's own events come through its sink, the data planes' through
+// followEvents.
+func (mgr *Manager) observe(ev flowlog.Event) {
+	mgr.wd.Observe(ev)
+	mgr.al.Observe(ev)
+	if mgr.otlp != nil {
+		mgr.otlp.Observe(ev)
+	}
 }
 
 // SystemResolver returns the first nameserver from /etc/resolv.conf.
@@ -626,44 +645,14 @@ func (mgr *Manager) setup(ctx context.Context, rec Record, pol *policy.Policy, r
 			return err
 		}
 	}
-	proxy := dnsproxy.New(dnsproxy.Config{
-		SandboxID:  rec.ID,
-		Index:      sb.Index,
-		Listen:     netip.AddrPortFrom(sb.HostAddr, 53),
-		Insert:     insertAllowed,
-		Sink:       mgr.sink,
-		CountQuery: func(id, verdict string) { mgr.m.DNSQueries.WithLabelValues(id, verdict).Inc() },
-		StatePath:  mgr.dnsStatePath(rec.ID),
-	}, mgr.proxySettings(pol))
-	if rec.Quarantine != nil {
-		proxy.SetQuarantined(true)
-	}
-	if err := proxy.Start(); err != nil {
+	files := dataplane.FilesFor(mgr.opts.StateDir, sb.Index)
+	s := &sandbox{rec: rec, addr: sb, policy: pol, dp: dataplane.NewClient(files.Socket), dpFiles: files}
+	s.follow = mgr.followEvents(rec.ID) // before the data plane can log anything
+	if err := mgr.startDataplane(ctx, s, restoring); err != nil {
+		s.stopFollow()
 		_ = mgr.sink.Close(rec.ID)
 		return err
 	}
-	var rl *relay.Relay
-	if mgr.relayed() {
-		rl = relay.New(relay.Config{
-			SandboxID: rec.ID,
-			Listen:    netip.AddrPortFrom(sb.HostAddr, addressing.RelayPort),
-			Upstream:  mgr.opts.UpstreamProxy,
-			Domain:    proxy.Domain,
-			Synthetic: mgr.syntheticPool(),
-			Sink:      mgr.sink,
-			Count:     mgr.countRelay,
-			Log:       mgr.log,
-		}, relaySettings(pol))
-		if rec.Quarantine != nil {
-			rl.SetQuarantined(true)
-		}
-		if err := rl.Start(); err != nil {
-			proxy.Stop()
-			_ = mgr.sink.Close(rec.ID)
-			return err
-		}
-	}
-	s := &sandbox{rec: rec, addr: sb, policy: pol, proxy: proxy, relay: rl}
 	mgr.mu.Lock()
 	mgr.byID[rec.ID] = s
 	mgr.byIndex[sb.Index] = s
@@ -729,13 +718,6 @@ func relaySettings(pol *policy.Policy) relay.Settings {
 	return relay.Settings{AllowDomains: pol.Egress.AllowDomains, AllowCIDRs: cidrs, MaxConns: pol.Limits.MaxConns}
 }
 
-func (mgr *Manager) countRelay(id, result, reason string) {
-	mgr.m.RelayConnections.WithLabelValues(id, result).Inc()
-	if reason != "" {
-		mgr.m.Denied.WithLabelValues(id, reason).Inc()
-	}
-}
-
 func shapeLimits(pol *policy.Policy) shaper.Limits {
 	return shaper.Limits{EgressBits: pol.EgressBitsPerSec(), IngressBits: pol.IngressBitsPerSec()}
 }
@@ -766,13 +748,6 @@ func (mgr *Manager) syntheticPool() netip.Prefix {
 	return mgr.opts.SyntheticDNS
 }
 
-// insertAllowed adds DNS answers to the allow (and direct) sets over
-// netlink: it runs on every allowed DNS answer, where an `nft` process cost
-// milliseconds per answer.
-func insertAllowed(ctx context.Context, k int, entries []nft.AllowEntry, direct bool) error {
-	return nft.InsertAllow(ctx, k, entries, direct)
-}
-
 // ApplyPolicy hot-reloads a sandbox's policy: the chain is re-rendered and
 // the allow sets flushed and repopulated in one transaction, so established
 // flows survive. tc and Firecracker limits follow.
@@ -790,22 +765,10 @@ func (mgr *Manager) ApplyPolicy(ctx context.Context, id, policyYAML string) (Inf
 	if err := mgr.ensureHost(ctx); err != nil {
 		return Info{}, err
 	}
-	err = s.proxy.Reload(mgr.proxySettings(pol), func(live, direct []nft.AllowEntry) error {
-		rules := mgr.sandboxRules(s.addr.Index, pol, live, direct, false)
-		rules.Quarantined = s.rec.Quarantine != nil
-		script, err := nft.RenderSandbox(rules)
-		if err != nil {
-			return err
-		}
-		return nft.Apply(ctx, script)
-	})
-	if err != nil {
-		// Put the proxy back on the old policy; the nft transaction was atomic.
-		_ = s.proxy.Reload(mgr.proxySettings(s.policy), func(_, _ []nft.AllowEntry) error { return nil })
+	// The data plane re-renders the ruleset with the allow sets refilled
+	// from its DNS cache, atomically, and rolls back on failure.
+	if err := s.dp.ApplyPolicy(ctx, mgr.dataplanePolicy(s, pol)); err != nil {
 		return Info{}, err
-	}
-	if s.relay != nil {
-		s.relay.Reload(relaySettings(pol))
 	}
 	if err := shaper.Apply(ctx, s.addr, shapeLimits(pol)); err != nil {
 		return Info{}, fmt.Errorf("policy applied to firewall and DNS but not to tc: %w", err)
@@ -894,11 +857,10 @@ func (mgr *Manager) Quarantine(ctx context.Context, id, reason string, freeze bo
 	if err := nft.Apply(ctx, script); err != nil {
 		return Info{}, fmt.Errorf("quarantine firewall: %w", err)
 	}
-	s.proxy.SetQuarantined(true)
-	if s.relay != nil {
-		s.relay.SetQuarantined(true)
-	}
 	var errs []error
+	if err := s.dp.SetQuarantined(ctx, true); err != nil {
+		errs = append(errs, fmt.Errorf("network cut, but the data plane was not told: %w", err))
+	}
 	killed, err := flowlog.KillFlows(s.addr.NsAddr)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("network cut, but deleting conntrack entries failed: %w", err))
@@ -950,11 +912,10 @@ func (mgr *Manager) Release(ctx context.Context, id string) (Info, error) {
 	if err := nft.Apply(ctx, script); err != nil {
 		return Info{}, err
 	}
-	s.proxy.SetQuarantined(false)
-	if s.relay != nil {
-		s.relay.SetQuarantined(false)
-	}
 	var errs []error
+	if err := s.dp.SetQuarantined(ctx, false); err != nil {
+		errs = append(errs, fmt.Errorf("firewall restored, but the data plane was not told: %w", err))
+	}
 	if q.Frozen {
 		if err := mgr.thaw(ctx, s); err != nil {
 			errs = append(errs, fmt.Errorf("network restored, but thawing failed: %w", err))
@@ -1028,8 +989,7 @@ func (mgr *Manager) destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	s.stop()
-	mgr.unregister(id, s.addr.Index)
+	mgr.unregister(id, s.addr.Index) // also stops the data plane
 	err = mgr.teardown(ctx, id, s.addr)
 	_ = mgr.sink.Close(id)
 	mgr.m.Forget(id)
@@ -1071,7 +1031,7 @@ func (mgr *Manager) Nuke(ctx context.Context) error {
 	mgr.byIndex = map[int]*sandbox{}
 	mgr.mu.Unlock()
 	for id, s := range all {
-		s.stop()
+		s.stopFollow() // Cleanup kills the data planes
 		mgr.wd.Remove(id)
 		mgr.al.Remove(id)
 		_ = mgr.sink.Close(id)
@@ -1088,6 +1048,10 @@ func Cleanup(ctx context.Context, stateDir, chrootBase string) error {
 		stateDir = DefaultStateDir
 	}
 	var errs []error
+	// Data planes first: they hold the sandboxes' DNS and relay listeners.
+	if err := dataplane.KillAll(stateDir); err != nil {
+		errs = append(errs, err)
+	}
 	if err := fc.CleanupJails(chrootBase); err != nil {
 		errs = append(errs, err)
 	}
@@ -1126,14 +1090,18 @@ func (mgr *Manager) lookup(id string) (*sandbox, error) {
 
 func (mgr *Manager) unregister(id string, k int) {
 	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	if s, ok := mgr.byID[id]; ok {
-		s.stop()
+	s, ok := mgr.byID[id]
+	delete(mgr.byID, id)
+	delete(mgr.byIndex, k)
+	mgr.mu.Unlock()
+	if ok {
+		// Outside mu: stopping waits for the process to exit.
+		if err := mgr.stopDataplane(s); err != nil {
+			mgr.log.Warn("stopping data plane", "id", id, "err", err)
+		}
 	}
 	mgr.wd.Remove(id)
 	mgr.al.Remove(id)
-	delete(mgr.byID, id)
-	delete(mgr.byIndex, k)
 }
 
 // Get returns one sandbox.
@@ -1181,20 +1149,21 @@ func (mgr *Manager) Domain(k int, ip netip.Addr) string {
 	if !ok {
 		return ""
 	}
-	return s.proxy.Domain(ip)
+	ctx, cancel := context.WithTimeout(mgr.bg, queryTimeout)
+	defer cancel()
+	d, _ := s.dp.Domain(ctx, ip)
+	return d
 }
 
 // Sink exposes the event sink for collectors.
 func (mgr *Manager) Sink() *flowlog.Sink { return mgr.sink }
 
-// Close stops DNS and relay listeners and closes logs. Sandboxes, including running
-// VMs, keep existing and are restored by the next daemon start; without
-// the proxy their DNS fails closed.
+// Close stops the daemon's own work and closes its logs. Sandboxes keep
+// running, data planes and VMs included, and are adopted by the next daemon
+// start: DNS keeps answering and relayed connections keep flowing meanwhile.
 func (mgr *Manager) Close() {
+	mgr.stopBg() // event followers and the data plane supervisor
 	mgr.mu.Lock()
-	for _, s := range mgr.byID {
-		s.stop()
-	}
 	mgr.sink.CloseAll()
 	mgr.mu.Unlock()
 	mgr.al.Close() // deliver queued alerts, bounded

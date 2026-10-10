@@ -110,7 +110,7 @@ There is no TLS termination.
 QUIC (UDP to the same ports) to DNS-learned addresses is rejected (`quic_blocked`) because its server name cannot be checked; clients fall back to TCP.
 Other ports are forwarded unchecked.
 Add a port only if its clients speak first with TLS or HTTP (`--sni-check-ports 80,443,8443`, say); for a server-first protocol the relay waits 1s for a name before it connects.
-Connections through the relay end when the daemon stops, unlike forwarded flows.
+Each sandbox's DNS proxy and relay run in a data plane process of their own, which outlives the daemon: relayed connections and DNS keep working through a daemon restart or crash.
 Turn it off with `daemon --sni-check=false`.
 
 `sandbox exec` runs the command inside the sandbox's netns as `nobody`, with every capability dropped, so nothing in it can change its own network configuration.
@@ -350,7 +350,7 @@ With an upstream proxy, export goes through it, except to loopback and `no_proxy
 - No connection leaves the host unless its destination was returned by an allowlisted DNS answer or is in `allow_cidrs`.
   Behind an upstream proxy, the proxy is only ever asked for allowlisted names, addresses in `allow_cidrs`, or addresses the firewall already admitted.
 - No DNS query for a name that is not allowlisted reaches any resolver.
-- Policy is enforced fail-closed. A sandbox interface without rules is dropped, and while the daemon is down nothing answers the sandbox's DNS.
+- Policy is enforced fail-closed. A sandbox interface without rules is dropped. While the daemon is down, each sandbox's data plane keeps enforcing the last policy applied; if it dies too, nothing answers the sandbox's DNS until the daemon restarts it.
 
 **Out of scope:** payload inspection, TLS interception, ingress, IPv6 and multi-host deployment.
 

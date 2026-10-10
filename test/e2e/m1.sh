@@ -105,9 +105,17 @@ expect_eq "curl https://example.com now succeeds" "$(sbx t1 curl -sS -m 20 -o /d
 expect_eq "other sandbox unaffected by reload" "$(sandwall sandbox list --json | jq -r '.[] | select(.id=="t2") | .policy.egress.allow_domains | index("example.com")')" null
 
 log "daemon restart restores sandboxes"
+dp_pid=$(cat "$STATE/dataplane/1.pid")
 stop_daemon
-expect_eq "DNS fails closed while daemon is down" "$(ip netns exec sb1 dig +tries=1 +time=2 pypi.org | awk '/status:/ {print $6}')" ""
+# Each sandbox's DNS proxy and relay run in a data plane process of their
+# own, which keeps serving while the daemon is down.
+# (Straight into the netns: `sandbox exec` itself needs the daemon.)
+ns_status() { ip netns exec sb1 dig +tries=1 +time=3 "$1" | awk '/status:/ {gsub(",", "", $6); print $6}'; }
+expect_eq "DNS still answers while the daemon is down" "$(ns_status example.com)" NOERROR
+expect_eq "and still refuses what the policy refuses" "$(ns_status pypi.org)" REFUSED
+expect_eq "sandbox still reaches allowed sites" "$(ip netns exec sb1 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://example.com/)" 200
 start_daemon || exit 1
+expect_eq "restarted daemon adopted the running data plane" "$(cat "$STATE/dataplane/1.pid")" "$dp_pid"
 expect_eq "sandboxes restored" "$(sandwall sandbox list --json | jq -r '[.[].id] | join(",")')" "t1,t2"
 expect_eq "restored sandbox keeps reloaded policy" "$(sbx t1 curl -sS -m 20 -o /dev/null -w '%{http_code}' https://example.com/)" 200
 

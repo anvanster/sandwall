@@ -2,10 +2,13 @@ package flowlog
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseIPv4(t *testing.T) {
@@ -77,5 +80,55 @@ func TestSinkAndTail(t *testing.T) {
 	var e Event
 	if err := json.Unmarshal([]byte(lines[0]), &e); err != nil || e.QName != "example.com." || e.TS.IsZero() {
 		t.Errorf("first deny line = %+v, %v", e, err)
+	}
+}
+
+func TestFollow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	appendLine := func(s string) {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendLine(`{"type":"dns","qname":"old."}` + "\n") // before Follow: skipped
+
+	got := make(chan string, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Follow(ctx, path, func(e Event) { got <- e.QName })
+	time.Sleep(3 * followPoll)
+
+	appendLine(`{"type":"dns","qname":"a."}` + "\n")
+	appendLine(`{"type":"dns","qn`) // a line written in two parts
+	time.Sleep(2 * followPoll)
+	appendLine(`ame":"b."}` + "\n")
+	for _, want := range []string{"a.", "b."} {
+		select {
+		case q := <-got:
+			if q != want {
+				t.Fatalf("got %q, want %q", q, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no event %q", want)
+		}
+	}
+
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * followPoll)
+	appendLine(`{"type":"dns","qname":"after-truncate."}` + "\n")
+	select {
+	case q := <-got:
+		if q != "after-truncate." {
+			t.Fatalf("got %q", q)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing after truncation")
 	}
 }

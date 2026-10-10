@@ -9,7 +9,7 @@ E2E_ENV = SANDWALL=$(CURDIR)/$(BIN) $(if $(FC_ASSETS),FC_ASSETS=$(FC_ASSETS)) \
 	$(if $(CHROOT_BASE),CHROOT_BASE=$(CHROOT_BASE)) $(if $(E2E_TMP),E2E_TMP=$(E2E_TMP)) \
 	$(foreach v,CLONES CLONE_STAGGER FETCH_CONCURRENCY REAL_PROXY HTTP3_CURL,$(if $($(v)),$(v)=$($(v))))
 
-.PHONY: psl-update build test vet fmt-check e2e e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-s1-real e2e-relay-cost e2e-synthetic e2e-quarantine e2e-alerts e2e-otel fc-assets clean
+.PHONY: psl-update build test vet fmt-check e2e e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-s1-real e2e-relay-cost e2e-synthetic e2e-dataplane e2e-quarantine e2e-alerts e2e-otel fc-assets clean
 
 build:
 	CGO_ENABLED=0 GOOS=linux $(GO) build $(GOFLAGS) -o $(BIN) ./cmd/sandwall
@@ -25,7 +25,7 @@ fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
 # Root-only milestone acceptance tests. Run inside a disposable Linux VM.
-e2e: e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-quarantine e2e-alerts e2e-otel e2e-synthetic
+e2e: e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-quarantine e2e-alerts e2e-otel e2e-synthetic e2e-dataplane
 
 e2e-m1: build
 	sudo $(E2E_ENV) bash test/e2e/m1.sh
@@ -59,6 +59,10 @@ e2e-s1-real: build
 # max_ingress_bw cap. Not part of e2e (takes minutes).
 e2e-relay-cost: build
 	sudo $(E2E_ENV) bash test/e2e/relay-cost.sh
+
+# Data plane processes: relayed connections and DNS outlive daemon restarts.
+e2e-dataplane: build
+	sudo $(E2E_ENV) bash test/e2e/dataplane.sh
 
 # Synthetic DNS behind an upstream proxy (--synthetic-dns).
 e2e-synthetic: build

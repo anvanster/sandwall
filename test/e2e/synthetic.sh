@@ -100,9 +100,13 @@ expect_ok "the new flow is still attributed to the name" \
 	test "$(jq -c "select(.type==\"flow\" and .dst_ip==\"$addr\" and .dst_domain==\"a.attacker.test\")" "$LOGS/t1.jsonl" | wc -l)" -gt "$flows_before"
 
 log "after a restart that lost the DNS state"
+# The mappings also live in the sandbox's data plane process, which outlives
+# the daemon; losing them takes stopping that too.
 stop_daemon
+kill -9 "$(cat "$STATE/dataplane/1.pid")"
 rm -f "$DNS_STATE"
 start_daemon "${FLAGS[@]}" || exit 1
+for _ in $(seq 50); do [[ -S "$STATE/dataplane/1.sock" ]] && break; sleep 0.1; done
 sbx t1 curl -sk -m 3 --resolve "a.attacker.test:$ATTACKER_HOLD_PORT:$addr" "https://a.attacker.test:$ATTACKER_HOLD_PORT/" >/dev/null 2>&1
 wait_log t1 "TLS with the name still reaches the proxy by name" \
 	".type==\"relay\" and .verdict==\"allow\" and .dst_ip==\"$addr\" and .target==\"a.attacker.test:$ATTACKER_HOLD_PORT\""

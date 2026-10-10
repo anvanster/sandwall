@@ -4,6 +4,7 @@ package flowlog
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -222,6 +223,75 @@ func Tail(path string, w io.Writer, f Filter, follow bool, stop <-chan struct{})
 			r.Reset(file)
 			partial.Reset()
 			offset = 0
+		}
+	}
+}
+
+// followPoll is how often Follow checks for new lines.
+const followPoll = 200 * time.Millisecond
+
+// Follow calls fn for every complete JSONL line appended to path after the
+// call, until ctx is done. Lines already there are skipped, so a restarted
+// reader never replays them; a file created later is read from its start,
+// and a truncated one from its new start. Lines that do not parse are
+// skipped.
+func Follow(ctx context.Context, path string, fn func(Event)) {
+	var (
+		f       *os.File
+		r       *bufio.Reader
+		offset  int64
+		partial []byte
+	)
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+	}()
+	open := func(fromEnd bool) {
+		var err error
+		if f, err = os.Open(path); err != nil {
+			f = nil
+			return
+		}
+		offset = 0
+		if fromEnd {
+			if offset, err = f.Seek(0, io.SeekEnd); err != nil {
+				f.Close()
+				f = nil
+				return
+			}
+		}
+		r, partial = bufio.NewReader(f), nil
+	}
+	open(true)
+	for {
+		if f == nil {
+			open(false) // created after Follow started: all of it is new
+		}
+		if f != nil {
+			for {
+				chunk, err := r.ReadBytes('\n')
+				offset += int64(len(chunk))
+				partial = append(partial, chunk...)
+				if err != nil {
+					break
+				}
+				var e Event
+				if json.Unmarshal(partial, &e) == nil {
+					fn(e)
+				}
+				partial = partial[:0]
+			}
+			if st, err := f.Stat(); err == nil && st.Size() < offset {
+				f.Close()
+				f = nil
+				open(false)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(followPoll):
 		}
 	}
 }

@@ -31,7 +31,6 @@ Detection without a working kill switch is half a control: today nothing acts on
 
 ## Known limitations worth revisiting
 
-- Relayed connections (ports 80/443 with the SNI check, all TCP behind a proxy) end when the daemon stops; forwarded flows survive. A graceful drain or handing the listeners to the new daemon would fix that.
 - `no_proxy` destinations bypass the relay, so they get no SNI/Host check.
 - A destination that refuses the relay's connection appears to the sandbox as an accepted connection that is then reset.
 - No IPv6.

@@ -68,8 +68,8 @@ Clearing the bounding set means not even a setuid binary can regain `CAP_NET_ADM
 
 ### Daemon restart and state
 Sandbox records are persisted under `--state-dir` (default `/var/lib/sandwall/sandboxes/`).
-A restarted daemon re-applies each sandbox idempotently and rebinds its DNS proxy, keeping the existing `allow_<k>` contents so established clients keep working.
-While the daemon is down, sandbox DNS fails closed: nothing listens on `10.200.k.1:53`.
+A restarted daemon re-applies each sandbox idempotently and adopts its data plane (DNS proxy and relay, see "Data plane processes"), keeping the existing `allow_<k>` contents so established clients keep working.
+While the daemon is down, sandbox DNS and relayed connections keep working: they run in the data plane processes, which outlive the daemon.
 `nuke` works with or without a running daemon.
 It asks a live daemon to drop its state, then sweeps the host directly.
 It also SIGKILLs any process still inside an `sb<k>` netns.
@@ -316,7 +316,7 @@ An allowlisted SNI or Host is used as always; an IP-literal Host falls back to t
 A pool address is never forwarded by address, even if `allow_cidrs` covers it.
 
 A restarted daemon keeps `allow_<k>` and, since the DNS cache is persisted (next section), the mappings too, so a pool address keeps meaning the same name.
-Only if the cache was lost (a crash within the 2s flush window for a refresh, or a deleted state file) are connections to earlier pool addresses that carry no name refused as `synthetic_unmapped`, until the client looks the name up again; connections that carry their name keep working either way.
+The cache lives in the sandbox's data plane process, which outlives the daemon, and in its state file; only if both are lost (the data plane dies within the 2s flush window of a change, or dies after the file was deleted) are connections to earlier pool addresses that carry no name refused as `synthetic_unmapped`, until the client looks the name up again; connections that carry their name keep working either way.
 
 ### The DNS cache survives restarts
 Each sandbox's DNS cache (which allowlisted name resolved to which address, until when) is saved to `<state-dir>/dns/<id>.json` (mode 0600) and loaded when the daemon restores the sandbox.
@@ -340,9 +340,9 @@ The proxy is a property of the host network, so it is configured on the daemon, 
 `--upstream-proxy http://[user:pass@]proxy.example:3128` with `--no-proxy <list>`, or `--upstream-proxy-from-env` to read `https_proxy` (else `http_proxy`) and `no_proxy`.
 Only `http://` proxies are supported. The mode applies to every sandbox of the daemon; restarting the daemon with or without it re-renders every sandbox accordingly.
 
-### Relayed connections end with the daemon
-Forwarded flows live in the kernel and survive a daemon restart; relayed connections are terminated in the sandwall process and do not.
-New connections work again as soon as the restarted daemon has rebound its relays.
+### Relayed connections and the daemon
+Forwarded flows live in the kernel; relayed connections live in the sandbox's data plane process, which outlives the daemon (see "Data plane processes").
+Both survive a daemon restart or crash; relayed connections end only when the data plane itself stops (destroy, nuke, a structural config change, or its own crash).
 
 ### Limits and observability
 - tc shaping on the veth, `ct count` and the new-connection rate all act on the sandbox leg, unchanged.
@@ -372,7 +372,7 @@ The `proxy` log event and `sandwall_proxy_connects_total` became `relay` and `sa
 ### On by default
 `daemon --sni-check` defaults to on, because the shared-CDN gap it closes is the most practical way around a domain allowlist.
 `--sni-check=false` restores plain forwarding.
-Costs: connections on ports 80 and 443 pass through a user-space splice, and they end when the daemon stops, while forwarded flows survive a restart.
+Costs: connections on ports 80 and 443 pass through a user-space splice in the sandbox's data plane process; they survive daemon restarts like forwarded flows, but not a restart of the data plane itself.
 A destination that refuses the relay's connection shows up to the sandbox as an accepted connection that is then reset, logged as `dial_error`.
 
 ### Decision rules
@@ -559,3 +559,35 @@ The project was developed as `egressd` and renamed to `sandwall` before its firs
 An earlier, unrelated project, castai/egressd (Kubernetes-aware network traffic monitoring, archived in 2026), works in the same space of Linux egress traffic, conntrack and Prometheus metrics under that name.
 Everything was renamed at once without compatibility shims: binary, Go module, nftables tables (`inet sandwall`, `ip sandwall_vm`), log prefixes, metrics (`sandwall_*`), jail ids, and the default state, log, socket and asset paths.
 A host that ran the old binary needs one `egressd nuke` before switching, since `sandwall nuke` does not know the old names.
+
+## Data plane processes
+
+### Why
+The DNS proxy and the relay ran inside the daemon, so stopping or restarting it ended every relayed connection (SNI-checked HTTP and HTTPS, and all TCP behind an upstream proxy) and left sandboxes without DNS until it was back.
+A graceful drain would only cover planned restarts and delay them; handing listening sockets to a new daemon would only cover planned upgrades.
+Moving them into a process per sandbox covers restarts and daemon crashes alike, the way Firecracker VMs already outlive the daemon.
+
+### Shape
+`sandwall dataplane --config <state-dir>/dataplane/<k>.json` (a hidden command, started by the daemon in its own session) runs one sandbox's DNS proxy and relay, writes its pid file and serves a root-only control socket next to its config.
+Files are named by sandbox index, not ID: a unix socket path is limited to about 108 bytes and IDs can be 63.
+The config file (0600) holds everything the data plane needs, the upstream proxy URL with its credentials included; before, those only lived in the daemon's memory and command line.
+The control API (JSON over the socket) has `status` (protocol version, pid, config hash), `policy` (a hot reload), `quarantine`, `domain` (the name behind an address, for flow logs) and `counters`.
+A policy reload keeps its old atomicity: the data plane swaps the DNS settings and re-renders the sandbox's ruleset, with the allow sets refilled from its DNS cache, while no DNS answer can insert; the daemon only renders the rule template.
+
+### Adopting, restarting, supervising
+A restarted daemon adopts a running data plane whose protocol version and structural config hash match (listeners, files, whether there is a relay, its upstream proxy, the synthetic pool) and reapplies policy and quarantine to it; settings changes alone never restart it.
+A structural change (adding or removing an upstream proxy, `--sni-check=false`, a new protocol version) restarts it, which ends its relayed connections; the daemon logs that.
+Every 2s the daemon checks each data plane and restarts one that died; its DNS cache comes back from the state file.
+The pid in a pid file is only trusted if `/proc/<pid>/cmdline` is that sandbox's data plane, so a reused pid is never signalled.
+Destroy stops the data plane (SIGTERM, then SIGKILL after 5s); `nuke` kills every data plane first, with or without a running daemon.
+
+### Events and metrics
+The data plane appends its own events (`dns`, `relay`) to the sandbox's JSONL log; the daemon appends the rest (`deny`, `flow`, `quarantine`, ...) to the same file, each line one `O_APPEND` write.
+The daemon tails each sandbox log for the data plane's events and feeds them to the watchdog (auto-quarantine), webhooks and OTel export, and counts relay refusals in `sandwall_denied_total` as before.
+It reads from the end of the file when it starts: events written while the daemon was down are in the log but trigger no alert, quarantine or metric.
+`sandwall_dns_queries_total` and `sandwall_relay_connections_total` are kept by the data planes and read at scrape time, so they survive daemon restarts; they start over when a data plane restarts, which Prometheus treats as a counter reset.
+
+### What changed for users
+Sandbox DNS keeps answering, and relayed connections keep flowing, while the daemon is down; the policy in force is the last one applied.
+M1 used to check that DNS fails closed without the daemon and now checks that it keeps answering, still refusing what the policy refuses.
+`test/e2e/dataplane.sh` checks that a relayed download completes across a daemon restart, across a `kill -9` of the daemon and, behind an upstream proxy, across a restart; that the daemon adopts the same data plane, restarts a killed one (which still knows its DNS cache), and restarts it on a structural change; that relay refusals and the data plane's counters reach the metrics; and that destroy and `nuke` leave no data plane behind.

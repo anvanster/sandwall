@@ -48,6 +48,7 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(
 		newDaemonCmd(g),
+		newDataplaneCmd(),
 		newSandboxCmd(g),
 		newPolicyCmd(g),
 		newVMCmd(g),
