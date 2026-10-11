@@ -57,6 +57,16 @@ const MaxClones = 200
 
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
 
+// ValidID reports whether id can name a sandbox. IDs become file names in
+// the state and log directories, so a valid ID never contains a path
+// separator and never starts with a dot.
+func ValidID(id string) error {
+	if !idPattern.MatchString(id) {
+		return fmt.Errorf("invalid sandbox id %q: use 1-63 of [a-zA-Z0-9_.-], starting alphanumeric", id)
+	}
+	return nil
+}
+
 // ErrNotFound is returned for unknown sandbox IDs.
 var ErrNotFound = errors.New("sandbox not found")
 
@@ -378,6 +388,10 @@ func (mgr *Manager) restore(ctx context.Context) error {
 			mgr.log.Error("skipping corrupt sandbox record", "file", e.Name(), "err", err)
 			continue
 		}
+		if err := ValidID(rec.ID); err != nil {
+			mgr.log.Error("skipping sandbox record", "file", e.Name(), "err", err)
+			continue
+		}
 		pol, err := policy.Parse([]byte(rec.Policy))
 		if err != nil {
 			mgr.log.Error("skipping sandbox with invalid stored policy", "id", rec.ID, "err", err)
@@ -535,8 +549,8 @@ func (mgr *Manager) Clone(ctx context.Context, snapshotDir string, count int, pr
 
 // create runs with opMu held.
 func (mgr *Manager) create(ctx context.Context, rec Record) (Info, error) {
-	if !idPattern.MatchString(rec.ID) {
-		return Info{}, fmt.Errorf("invalid sandbox id %q: use 1-63 of [a-zA-Z0-9_.-], starting alphanumeric", rec.ID)
+	if err := ValidID(rec.ID); err != nil {
+		return Info{}, err
 	}
 	pol, err := mgr.parseNew(rec.Policy)
 	if err != nil {

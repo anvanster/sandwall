@@ -68,6 +68,9 @@ func newLogsCmd(g *globalFlags) *cobra.Command {
 		Short: "Print a sandbox's DNS, deny and flow log (JSONL)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := daemon.ValidID(args[0]); err != nil {
+				return err
+			}
 			return flowlog.Tail(flowlog.Path(g.logDir, args[0]), os.Stdout,
 				flowlog.Filter{DenyOnly: denyOnly}, follow, cmd.Context().Done())
 		},
