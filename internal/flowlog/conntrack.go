@@ -19,7 +19,9 @@ import (
 const (
 	ctReadBuffer = 8 << 20
 	ctQueue      = 8192
-	ctWorkers    = 2
+	// One reader keeps a flow's events in kernel order: with more, a NEW
+	// can reach handle after its UPDATE or DESTROY.
+	ctWorkers = 1
 	// Start times are kept for flows whose DESTROY event never arrives
 	// (lost under ENOBUFS) only this long; TCP established times out at 5 days.
 	ctStartTTL = 6 * 24 * time.Hour

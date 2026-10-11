@@ -586,6 +586,7 @@ Flows come from conntrack events.
 Conntrack only sends DESTROY, the one event with byte counters, after a closed TCP connection leaves TIME_WAIT (120s by default).
 To log flows promptly, the collector also listens to UPDATE events: when a TCP flow reaches TIME_WAIT or CLOSE, it fetches the entry's counters with a conntrack query, logs the flow then, and skips the later DESTROY.
 Other protocols are logged at DESTROY.
+One goroutine reads the events, so each flow's NEW, UPDATE and DESTROY reach the collector in kernel order.
 
 The conntrack query needs `mdlayher/netlink` with upstream PR #315.
 A conntrack GET reply is flagged multi-part but ends with an ACK instead of a Done message, and v1.11.0 to v1.11.2 keep reading after the ACK, so the query never returns and the whole collector stops.
