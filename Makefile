@@ -11,7 +11,7 @@ E2E_ENV = SANDWALL=$(CURDIR)/$(BIN) $(if $(FC_ASSETS),FC_ASSETS=$(FC_ASSETS)) \
 	$(if $(CHROOT_BASE),CHROOT_BASE=$(CHROOT_BASE)) $(if $(E2E_TMP),E2E_TMP=$(E2E_TMP)) \
 	$(foreach v,CLONES CLONE_STAGGER FETCH_CONCURRENCY REAL_PROXY HTTP3_CURL,$(if $($(v)),$(v)=$($(v))))
 
-.PHONY: psl-update build test vet fmt-check license-check release e2e e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-s1-real e2e-relay-cost e2e-synthetic e2e-dataplane e2e-quarantine e2e-alerts e2e-otel fc-assets clean
+.PHONY: psl-update build test vet fmt-check license-check vulncheck release e2e e2e-m1 e2e-m2 e2e-m3 e2e-proxy e2e-s1 e2e-s1-real e2e-relay-cost e2e-synthetic e2e-dataplane e2e-quarantine e2e-alerts e2e-otel fc-assets clean
 
 build:
 	CGO_ENABLED=0 GOOS=linux $(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/sandwall
@@ -26,14 +26,27 @@ vet:
 fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
-# go-licenses runs on the build host and inspects the Linux build of sandwall.
+# Release tooling runs on the build host and inspects the Linux build of
+# sandwall; each tool is installed per host platform and version.
+TOOLS := bin/tools/$(shell $(GO) env GOHOSTOS)_$(shell $(GO) env GOHOSTARCH)
 GO_LICENSES_VERSION := v2.0.1
-GO_LICENSES := bin/tools/$(shell $(GO) env GOHOSTOS)_$(shell $(GO) env GOHOSTARCH)/go-licenses-$(GO_LICENSES_VERSION)
+GO_LICENSES := $(TOOLS)/go-licenses-$(GO_LICENSES_VERSION)
+GOVULNCHECK_VERSION := v1.8.0
+GOVULNCHECK := $(TOOLS)/govulncheck-$(GOVULNCHECK_VERSION)
 GO_LICENSES_ARGS := ./cmd/sandwall --ignore github.com/anvanster/sandwall
 
 $(GO_LICENSES):
 	GOOS= GOARCH= GOBIN=$(CURDIR)/$(dir $@) $(GO) install github.com/google/go-licenses/v2@$(GO_LICENSES_VERSION)
 	mv $(dir $@)go-licenses $@
+
+$(GOVULNCHECK):
+	GOOS= GOARCH= GOBIN=$(CURDIR)/$(dir $@) $(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	mv $(dir $@)govulncheck $@
+
+# Fail on known vulnerabilities, in dependencies or the Go toolchain, that
+# sandwall's code can reach.
+vulncheck: $(GOVULNCHECK)
+	GOOS=linux $(GOVULNCHECK) ./...
 
 # Fail on dependencies whose license is copyleft, forbidden or unrecognized.
 license-check: $(GO_LICENSES)
