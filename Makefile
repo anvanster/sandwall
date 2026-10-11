@@ -27,8 +27,11 @@ fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
 # Release tooling runs on the build host and inspects the Linux build of
-# sandwall; each tool is installed per host platform and version.
-TOOLS := bin/tools/$(shell $(GO) env GOHOSTOS)_$(shell $(GO) env GOHOSTARCH)
+# sandwall; each tool is installed per host platform, Go version and tool
+# version. go-licenses recognizes the standard library by the GOROOT it was
+# built with, so a binary built before a toolchain change rejects every
+# standard library package.
+TOOLS := bin/tools/$(shell $(GO) env GOHOSTOS)_$(shell $(GO) env GOHOSTARCH)_$(shell $(GO) env GOVERSION)
 GO_LICENSES_VERSION := v2.0.1
 GO_LICENSES := $(TOOLS)/go-licenses-$(GO_LICENSES_VERSION)
 GOVULNCHECK_VERSION := v1.8.0
