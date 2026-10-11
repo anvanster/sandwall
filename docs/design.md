@@ -587,6 +587,10 @@ Conntrack only sends DESTROY, the one event with byte counters, after a closed T
 To log flows promptly, the collector also listens to UPDATE events: when a TCP flow reaches TIME_WAIT or CLOSE, it fetches the entry's counters with a conntrack query, logs the flow then, and skips the later DESTROY.
 Other protocols are logged at DESTROY.
 
+The conntrack query needs `mdlayher/netlink` with upstream PR #315.
+A conntrack GET reply is flagged multi-part but ends with an ACK instead of a Done message, and v1.11.0 to v1.11.2 keep reading after the ACK, so the query never returns and the whole collector stops.
+`go.mod` therefore pins a netlink commit from `main` until a tagged release includes the fix; a Dependabot update that moves it back to v1.11.2 breaks the M2 flow-log checks.
+
 `ts_start` comes from `nf_conntrack_timestamp` where the kernel has it (enabled as an optional sysctl), otherwise from the time the collector saw the flow's NEW event.
 `dst_domain` comes from the sandbox's DNS cache.
 Byte counts are layer 3, so they include IP and TCP headers; on a 10 MiB download they come out 1.4 to 1.7% above the payload size.
