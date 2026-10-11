@@ -47,6 +47,7 @@ def escalate(name, resolver, front):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         with socket.create_connection((addr, 443), timeout=5) as raw:
             with ctx.wrap_socket(raw, server_hostname=sni):
                 print(f"agent: TLS to {front}'s address {addr} with SNI {sni} -> connected")
@@ -66,7 +67,7 @@ def main():
 
     with open(args.env, "rb") as f:
         secrets = f.read()
-    print(f"agent: read {len(secrets)} bytes from {args.env}")
+    print(f"agent: read {len(secrets)} bytes from {os.path.basename(args.env)}")
     label = secrets.hex()[:60]
     name = f"{label}.{args.dns_zone}"
     if args.escalate:

