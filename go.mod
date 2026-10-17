@@ -8,7 +8,7 @@ require (
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/mdlayher/netlink v1.11.3-0.20261010171025-160ad00e475c
 	github.com/miekg/dns v1.1.73
-	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/client_golang v1.25.0
 	github.com/spf13/cobra v1.10.2
 	github.com/ti-mo/conntrack v0.6.0
 	github.com/ti-mo/netfilter v0.5.3
@@ -40,9 +40,9 @@ require (
 	github.com/mdlayher/socket v0.7.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.70.1 // indirect
-	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/prometheus/client_model v0.6.3 // indirect
+	github.com/prometheus/common v0.72.0 // indirect
+	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
